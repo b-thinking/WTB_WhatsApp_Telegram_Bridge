@@ -138,8 +138,6 @@ celerybeat.pid
 .env
 .envrc
 .venv
-# JMA: Added .nosync for avoid problems with OneDrive
-.venv.nosync
 env/
 venv/
 ENV/
