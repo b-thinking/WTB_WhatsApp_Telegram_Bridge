@@ -208,6 +208,9 @@ __marimo__/
 # JMA: Ignore Mac attributes file
 .DS_Store
 
+# JMA: Data folder
+data/
+
 
 
 
