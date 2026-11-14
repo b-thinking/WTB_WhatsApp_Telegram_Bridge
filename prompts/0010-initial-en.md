@@ -28,7 +28,7 @@ The bridge will be implemented as a Telegram bot written in Python, with the fol
 - For accessing the Telegram API, using direct HTTP requests with `urllib` is initially suggested, but alternative approaches recommended by the agent may also be considered and reviewed.
 - The canonical Python version is 3.11.
 - Any additional requirements needed for `requirements.txt` must be identified. Each dependency must be checked for compatibility with the selected Python version before being added to that file.
-- Code style must follow PEP 8.
+- Code style must follow PEP 8. Any generated python code has to be sintactically validated using a python linter before committing or testing.
 - Names of code artifacts (functions, variables, classes, etc.) must be in English.
 - Code comments must be in English.
 - Project files (README.md, CLAUDE.md, AGENTS.md, etc.) must be written in English, including this file.
