@@ -1,0 +1,35 @@
+[Unit]
+Description=WhatsApp Telegram Bridge
+
+[Container]
+Image=ghcr.io/b-thinking/${GHCR_TAG}:${GHCR_VERSION}
+
+# Pull policy
+# Never pull the image
+# Pull=never
+# Pull only if the image does not exist locally
+Pull=missing
+# Pull if newer versions with same tag
+# Pull=newer
+
+ContainerName=${GHCR_TAG}
+
+Volume=${DEPLOY_VM_DIR}/${GHCR_TAG}/data:/app/data:Z
+
+Environment=LOG_LEVEL=DEBUG
+Environment=PHONE_NUMBER=${PHONE_NUMBER}
+Environment=TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+Environment=TELEGRAM_POLL_TIMEOUT=60
+
+# Maximum SHM Memory Size
+ShmSize=1g
+
+[Service]
+Restart=none 
+# Restart=always 
+# RestartSec=60
+
+[Install]
+WantedBy=default.target
+
+
