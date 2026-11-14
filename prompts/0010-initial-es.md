@@ -27,7 +27,7 @@ Quiero construir el puente como un bot de Telegram escrito en python, con los si
 - Para el tratamiento del API de Telegram, inicialmente se sugiere usar peticiones directas HTTP con urllib, pero se aceptan y revisar alternativas que nos recomienden.
 - La versión canónica de python a utilizar es la 3.11.
 - Se deben identificar cualquier requerimiento adicional para construir el archivo requirements.txt. Cualquier dependencia deberá validarse contra la versión de python seleccionada, antes de añadirla a dicho archivo.
-- El estilo de código debe ser PEP8. Todo código python generado debe ser validado usando un linter antes de añadirlo al repositorio git o ejecutado.
+- El estilo de código debe ser PEP8. Todo código python generado debe ser validado usando el linter ruff antes de añadirlo al repositorio git o ejecutado.
 - Los nombres de los artefactos (funciones, variables, clases, etc.) deben estar en inglés.
 - Los comentarios del código deben estar en inglés.
 - Los archivos de proyecto (README.md, CLAUDE.md, AGENTS.md, etc.) debe ser escritos en inglés, incluyendo este archivo
