@@ -19,13 +19,19 @@ Volume=${DEPLOY_VM_DIR}/${GHCR_TAG}/data:/app/data:Z,U
 Environment=LOG_LEVEL=DEBUG
 Environment=PHONE_NUMBER=${PHONE_NUMBER}
 Environment=TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
-Environment=TELEGRAM_POLL_TIMEOUT=60
+# TELEGRAM_POLL_TIMEOUT: Not implemented yet
+# Environment=TELEGRAM_POLL_TIMEOUT=60 
 
 # Maximum SHM Memory Size
 ShmSize=1g
 
+# Podman stop Timeout (has to be higher than Telegram Poll Timeout: Default 40s
+StopTimeout=60
+
 [Service]
-Restart=none 
+# Service stop Timeout. Has to be higher than pod stop timeout (see StopTimeout)
+TimeoutStopSec=70
+Restart=none
 # Restart=always 
 # RestartSec=60
 

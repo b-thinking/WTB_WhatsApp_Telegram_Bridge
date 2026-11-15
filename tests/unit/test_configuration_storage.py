@@ -80,6 +80,11 @@ def test_configure_logging_forces_requested_level(
     assert calls[0]["force"] is True
 
 
+def test_sigterm_handler_requests_the_graceful_shutdown_path() -> None:
+    with pytest.raises(KeyboardInterrupt):
+        wtb.handle_sigterm(15, None)
+
+
 def test_initialize_database_creates_schema_and_recovers_processing_rows(
     app_database: Any, caplog: pytest.LogCaptureFixture
 ) -> None:

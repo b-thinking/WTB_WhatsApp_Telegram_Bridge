@@ -8,6 +8,7 @@ import logging
 import os
 import queue
 import re
+import signal
 import sqlite3
 import sys
 import threading
@@ -44,6 +45,12 @@ def configure_logging(level_name: str) -> None:
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
         force=True,
     )
+
+
+def handle_sigterm(_signum: int, _frame: Any) -> None:
+    """Route container termination through the normal cleanup path."""
+    LOGGER.info("Received SIGTERM; requesting graceful shutdown")
+    raise KeyboardInterrupt
 
 
 def load_configuration() -> dict[str, str]:
@@ -407,29 +414,34 @@ def main() -> int:
         LOGGER.error("Configuration error: %s", error)
         return 1
 
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    DATABASE = initialize_database()
-
-    # Create threading events
-    qr_ready: threading.Event = threading.Event()
-
-    client: NewClient = NewClient(str(WHATSAPP_SESSION_PATH))
-
-    client.qr(on_qr)  # Set the event handler for QR generation.
-    client.event(PairStatusEv)(on_paired)  # Set the event handler for pairing.
-    client.event(ConnectedEv)(on_connected)  # Set the event handler for connection.
-
-    client.event(MessageEv)(handle_whatsapp_message)
-
-    # Start WhatsApp connection in a separate thread.
-    LOGGER.info("Starting WhatsApp connection...")
-
-    whatsapp_thread = threading.Thread(
-        target=connect_whatsapp, name="whatsapp-client", daemon=True
-    )
-    whatsapp_thread.start()
-
+    signal.signal(signal.SIGTERM, handle_sigterm)
+    DATABASE = None
+    client: NewClient | None = None
+    whatsapp_started = False
     try:
+        DATA_DIR.mkdir(parents=True, exist_ok=True)
+        DATABASE = initialize_database()
+
+        # Create threading events
+        qr_ready: threading.Event = threading.Event()
+
+        client = NewClient(str(WHATSAPP_SESSION_PATH))
+
+        client.qr(on_qr)  # Set the event handler for QR generation.
+        client.event(PairStatusEv)(on_paired)  # Set the event handler for pairing.
+        client.event(ConnectedEv)(on_connected)  # Set the event handler for connection.
+
+        client.event(MessageEv)(handle_whatsapp_message)
+
+        # Start WhatsApp connection in a separate thread.
+        LOGGER.info("Starting WhatsApp connection...")
+
+        whatsapp_thread = threading.Thread(
+            target=connect_whatsapp, name="whatsapp-client", daemon=True
+        )
+        whatsapp_started = True
+        whatsapp_thread.start()
+
         # Wait until Neonize has initialized the client or failed to connect.
         if not qr_ready.wait(timeout=30):
             LOGGER.error("WhatsApp client initialization timed out")
@@ -462,16 +474,18 @@ def main() -> int:
         LOGGER.info("Shutdown requested")
         return 0
     except Exception:
-        LOGGER.exception("WhatsApp pairing or Telegram connection/polling failed")
+        LOGGER.exception("WhatsApp startup, pairing, or Telegram polling failed")
         return 2
     finally:
-        try:
-            LOGGER.info("Stopping WhatsApp client...")
-            client.stop()
-        except Exception:
-            LOGGER.exception("Failed to stop the WhatsApp client cleanly")
-        finally:
+        if client is not None and whatsapp_started:
+            try:
+                LOGGER.info("Stopping WhatsApp client...")
+                client.stop()
+            except Exception:
+                LOGGER.exception("Failed to stop the WhatsApp client cleanly")
+        if DATABASE is not None:
             DATABASE.close()
+            DATABASE = None
     return 0
 
 
