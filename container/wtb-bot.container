@@ -14,7 +14,7 @@ Pull=missing
 
 ContainerName=${GHCR_TAG}
 
-Volume=${DEPLOY_VM_DIR}/${GHCR_TAG}/data:/app/data:Z
+Volume=${DEPLOY_VM_DIR}/${GHCR_TAG}/data:/app/data:Z,U
 
 Environment=LOG_LEVEL=DEBUG
 Environment=PHONE_NUMBER=${PHONE_NUMBER}

@@ -31,7 +31,10 @@ if [[ ! -f "$ENV_FILE" ]]; then
     return 1
 fi
 
-source "$ENV_FILE"
+echo "Loading environment file: $ENV_FILE"
+set -a
+source "${ENV_FILE}"
+set +a
 
 
 # --------------------------------------------------
@@ -43,7 +46,7 @@ if [[ -z "${DEPLOY_HOST:-}" ]]; then
     exit 1
 fi
 
-DEST_DIR="${DEPLOY_HOST}:~/.config"
+DEST_DIR="~/.config/containers/systemd"
 DATA_DIR="${DEPLOY_VM_DIR}/${GHCR_TAG}/data"
 
 # --------------------------------------------------
@@ -82,7 +85,7 @@ while IFS= read -r -d '' SOURCE_FILE; do
 
     mkdir -p "$(dirname "$STAGE_FILE")"
 
-    echo "Generating: $RELATIVE_PATH"
+    echo "Generating: ${RELATIVE_PATH}: ${SOURCE_FILE} -> ${STAGE_FILE}"
 
     envsubst < "$SOURCE_FILE" > "$STAGE_FILE"
 
@@ -104,12 +107,13 @@ find "$STAGE_DIR" -type f -exec chmod 600 {} +
 echo
 echo "Transferring files..."
 
-ssh "$DEPLOY_HOST" 'mkdir -p "$HOME/.config"'
+echo "Creating container dir: ${DEST_DIR}"
+ssh "$DEPLOY_HOST" "mkdir -p ${DEST_DIR}"
+echo "Creating data dir: ${DATA_DIR}"
 ssh "$DEPLOY_HOST" "mkdir -p ${DATA_DIR}"
 
 rsync -av \
-    "$STAGE_DIR/" \
-    "$DEST_DIR/"
-
+    "${STAGE_DIR}/" \
+    "${DEPLOY_HOST}:${DEST_DIR}/"
 echo
 echo "Deployment completed successfully."
