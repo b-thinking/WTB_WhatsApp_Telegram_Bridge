@@ -6,6 +6,7 @@ import html
 import json
 import logging
 import os
+import queue
 import re
 import sqlite3
 import sys
@@ -34,11 +35,14 @@ def configure_logging(level_name: str) -> None:
     """Configure application logging on stderr."""
     level = getattr(logging, level_name.upper(), None)
     if not isinstance(level, int):
-        raise TypeError("LOG_LEVEL must be a valid Python logging level")
+        raise ValueError(  # noqa: TRY004 - The setting is an invalid value, not a wrong type.
+            "LOG_LEVEL must be a valid Python logging level"
+        )
     logging.basicConfig(
         level=level,
         stream=sys.stderr,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+        force=True,
     )
 
 
@@ -296,11 +300,47 @@ def handle_whatsapp_message(client: NewClient, event: MessageEv) -> None:
             LOGGER.debug("Ignoring duplicate WhatsApp message %s", wa_message_id)
             return
 
-        sender = getattr(event.Info, "PushName", "") or getattr(source, "Sender", None)
-        sender_jid = getattr(sender, "User", "") if sender else ""
-        sender_name = str(sender) if sender and not sender_jid else sender_jid
-        if not sender_name:
+        push_name = getattr(event.Info, "Pushname", "").strip()
+        sender_jid = getattr(source, "Sender", None)
+        sender_alt_jid = getattr(source, "SenderAlt", None)
+        sender_user = getattr(sender_jid, "User", "")
+        sender_server = getattr(sender_jid, "Server", "")
+        sender_alt_user = getattr(sender_alt_jid, "User", "")
+        sender_alt_server = getattr(sender_alt_jid, "Server", "")
+        LOGGER.debug(
+            "WhatsApp sender metadata for message %s: pushname_available=%s, "
+            "sender_server=%r, sender_alt_available=%s, sender_alt_server=%r",
+            wa_message_id,
+            bool(push_name),
+            sender_server,
+            bool(sender_alt_user and sender_alt_server),
+            sender_alt_server,
+        )
+
+        if push_name:
+            sender_name = push_name
+            sender_name_source = "pushname"
+        elif sender_server == "lid" and sender_alt_user:
+            sender_name = sender_alt_user
+            sender_name_source = "sender_alt"
+        elif sender_user:
+            sender_name = sender_user
+            sender_name_source = "sender_jid"
+        else:
             sender_name = getattr(chat_jid, "User", "unknown sender")
+            sender_name_source = "chat_jid_fallback"
+            LOGGER.debug(
+                "No WhatsApp pushname or sender JID was available for message %s; "
+                "using chat JID fallback (server=%r)",
+                wa_message_id,
+                getattr(chat_jid, "Server", ""),
+            )
+
+        LOGGER.debug(
+            "Selected WhatsApp sender from %s for message %s",
+            sender_name_source,
+            wa_message_id,
+        )
         header = f"<b>Sender:</b> {html.escape(sender_name)}\n"
         original_id = f"\n\nWhatsApp message ID: {html.escape(wa_message_id)}"
         prefix = header
@@ -340,6 +380,7 @@ def handle_whatsapp_message(client: NewClient, event: MessageEv) -> None:
 def main() -> int:
     """Start Telegram polling and the persistent Neonize session."""
     global CONFIG, DATABASE
+    connection_errors: queue.Queue[tuple[Exception, Any]] = queue.Queue(maxsize=1)
 
     def on_qr(client: NewClient, qr_png: bytes) -> None:
         LOGGER.info("WhatsApp connection initialized (QR received)")
@@ -347,12 +388,17 @@ def main() -> int:
 
     def on_paired(client: NewClient, event: PairStatusEv) -> None:
         LOGGER.info("WhatsApp device successfully paired")
-        paired.set()
 
     def on_connected(client: NewClient, event: ConnectedEv) -> None:
         LOGGER.info("Connected to WhatsApp")
-        connected.set()
         qr_ready.set()
+
+    def connect_whatsapp() -> None:
+        try:
+            client.connect()
+        except Exception as error:  # noqa: BLE001 - Relay thread errors to main.
+            connection_errors.put((error, error.__traceback__))
+            qr_ready.set()
 
     try:
         CONFIG = load_configuration()
@@ -366,14 +412,12 @@ def main() -> int:
 
     # Create threading events
     qr_ready: threading.Event = threading.Event()
-    connected: threading.Event = threading.Event()
-    paired: threading.Event = threading.Event()
 
     client: NewClient = NewClient(str(WHATSAPP_SESSION_PATH))
 
-    client.qr(on_qr) # Set the event handler for QR generation
-    client.event(PairStatusEv)(on_paired) # Set the event handler for pairing
-    client.event(ConnectedEv)(on_connected) # Set the event handler for connection
+    client.qr(on_qr)  # Set the event handler for QR generation.
+    client.event(PairStatusEv)(on_paired)  # Set the event handler for pairing.
+    client.event(ConnectedEv)(on_connected)  # Set the event handler for connection.
 
     client.event(MessageEv)(handle_whatsapp_message)
 
@@ -381,44 +425,53 @@ def main() -> int:
     LOGGER.info("Starting WhatsApp connection...")
 
     whatsapp_thread = threading.Thread(
-        target=client.connect, name="whatsapp-client", daemon=True
+        target=connect_whatsapp, name="whatsapp-client", daemon=True
     )
     whatsapp_thread.start()
 
-    # Wait until the initial QR handshake is ready.
-    if not qr_ready.wait(timeout=30):
-        LOGGER.error("WhatsApp QR initialization timed out")
-        raise TimeoutError("WhatsApp QR initialization timed out")
-
-    if not client.is_logged_in:
-        try:
-            pairing_code = client.PairPhone(
-                CONFIG["PHONE_NUMBER"], 
-                show_push_notification=True,
-                client_name=ClientName.LINUX
-            )
-        except Exception:
-            LOGGER.exception("WhatsApp phone pairing could not be started")
-            DATABASE.close()
-            return 2
-        LOGGER.warning(
-            "WhatsApp registration is pending. Pairing code: %s", pairing_code
-        )
-
-
     try:
+        # Wait until Neonize has initialized the client or failed to connect.
+        if not qr_ready.wait(timeout=30):
+            LOGGER.error("WhatsApp client initialization timed out")
+            return 2
+
+        try:
+            connection_error, traceback = connection_errors.get_nowait()
+        except queue.Empty:
+            connection_error = None
+        if connection_error is not None:
+            LOGGER.error(
+                "WhatsApp connection failed",
+                exc_info=(type(connection_error), connection_error, traceback),
+            )
+            return 2
+
+        if not client.is_logged_in:
+            pairing_code = client.PairPhone(
+                CONFIG["PHONE_NUMBER"],
+                show_push_notification=True,
+                client_name=ClientName.LINUX,
+            )
+            LOGGER.warning(
+                "WhatsApp registration is pending. Pairing code: %s", pairing_code
+            )
+
         LOGGER.info("Starting Telegram polling...")
         telegram_polling_loop()
+    except KeyboardInterrupt:
+        LOGGER.info("Shutdown requested")
+        return 0
     except Exception:
-        LOGGER.exception("Telegram connection or polling failed")
+        LOGGER.exception("WhatsApp pairing or Telegram connection/polling failed")
         return 2
     finally:
         try:
-            LOGGER.info("Stoping WhatsApp client...")
+            LOGGER.info("Stopping WhatsApp client...")
             client.stop()
         except Exception:
             LOGGER.exception("Failed to stop the WhatsApp client cleanly")
-        DATABASE.close()
+        finally:
+            DATABASE.close()
     return 0
 
 
