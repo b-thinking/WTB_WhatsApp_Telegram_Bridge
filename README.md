@@ -13,10 +13,9 @@ from Telegram to WhatsApp are not implemented yet.
 - A Telegram bot token from [BotFather](https://core.telegram.org/bots#botfather)
 - A WhatsApp account that can link a device using a phone number
 
-The application dependencies are pinned in `requirements.txt`. Neonize
-`0.4.3.post0` publishes a Python-independent wheel and supports the Python 3.11
-runtime used by this project. `python-dotenv` loads local development settings
-from `.env`.
+The application dependencies are pinned in `requirements.txt`. Neonize publishes a Python-independent wheel `neonize` and supports the Python 3.11 runtime used by this project. `python-dotenv` loads local development settings from `.env`.
+
+Additional depencencies for development are in `requirements-dev.txt`, including `pytest` and `ruff`.
 
 ## Prerequisites
 
@@ -101,3 +100,16 @@ made exactly once.
 
 Logs are written to `stderr`. They do not include the Telegram token. Exit
 status 2 indicates a WhatsApp pairing or Telegram connection/polling failure.
+
+## Unit tests
+
+Run the unit tests from the project root with the configured Python environment:
+
+```sh
+python -m pytest tests/unit
+```
+
+The tests mock WhatsApp and Telegram APIs and do not require live accounts or
+network connections. They cover configuration validation, Telegram
+registration and polling state, SQLite recovery and deduplication, and
+WhatsApp text filtering and forwarding.
