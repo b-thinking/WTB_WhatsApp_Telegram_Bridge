@@ -43,9 +43,9 @@ replies are not implemented yet; those cases are listed for later phases.
 
 ## WhatsApp attachments to Telegram — later phase
 
-- [ ] **I-27 — Simple image**: Send one image. Confirm it arrives as a Telegram photo with the sender header.
-- [ ] **I-28 — Image with caption**: Send an image with a short caption. Confirm sender information and caption are preserved.
-- [ ] **I-29 — Image with text beyond caption limit**: Send an image with text exceeding Telegram's caption limit. Confirm the full text is sent separately before the attachment.
+- [x] **I-27 — Simple image**: Send one image. Confirm it arrives as a Telegram photo with the sender header.
+- [x] **I-28 — Image with caption**: Send an image with a short caption. Confirm sender information and caption are preserved.
+- [x] **I-29 — Image with text beyond caption limit**: Send an image with text exceeding Telegram's caption limit. Confirm the full text is sent separately before the attachment.
 - [ ] **I-30 — Simple video**: Send one video. Confirm it arrives as a Telegram video with the sender header.
 - [ ] **I-31 — GIF/animation**: Send a WhatsApp video with GIF playback enabled. Confirm Telegram receives it as an animation.
 - [ ] **I-32 — Document**: Send a document. Confirm it arrives with its filename and MIME type preserved.

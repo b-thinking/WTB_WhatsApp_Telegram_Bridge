@@ -17,7 +17,7 @@ def app_database(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
     data_dir = tmp_path / "data"
     monkeypatch.setattr(wtb, "DATA_DIR", data_dir)
     monkeypatch.setattr(wtb, "DATABASE_PATH", data_dir / "bridge.sqlite3")
-    database = wtb.initialize_database()
+    database = wtb.database_initialize()
     monkeypatch.setattr(wtb, "DATABASE", database)
     monkeypatch.setattr(
         wtb,
@@ -60,6 +60,30 @@ def telegram_calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict[str,
 
 
 @pytest.fixture
+def telegram_operations(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, Any]]:
+    """Record Telegram text and photo requests in their send order."""
+    operations: list[tuple[str, Any]] = []
+
+    def fake_request(
+        method: str, payload: dict[str, Any], *, timeout: int = 40
+    ) -> dict[str, Any]:
+        operations.append((method, payload))
+        return {"ok": True, "result": {"message_id": 700 + len(operations)}}
+
+    def fake_send_photo(
+        chat_id: int, caption: str, image_data: bytes, mime_type: str
+    ) -> dict[str, Any]:
+        operations.append(
+            ("sendPhoto", (chat_id, caption, image_data, mime_type))
+        )
+        return {"ok": True, "result": {"message_id": 700 + len(operations)}}
+
+    monkeypatch.setattr(wtb, "telegram_request", fake_request)
+    monkeypatch.setattr(wtb, "telegram_send_photo", fake_send_photo)
+    return operations
+
+
+@pytest.fixture
 def whatsapp_event_factory():
     """Build lightweight Neonize-like message events for handler tests."""
 
@@ -75,6 +99,9 @@ def whatsapp_event_factory():
         chat_user: str = "34111111111",
         chat_server: str = "s.whatsapp.net",
         is_from_me: bool = False,
+        is_group: bool | None = None,
+        image_caption: str | None = None,
+        image_mime_type: str = "image/jpeg",
     ) -> Any:
         sender = SimpleNamespace(User=sender_user, Server=sender_server)
         sender_alt = SimpleNamespace(
@@ -83,6 +110,7 @@ def whatsapp_event_factory():
         chat = SimpleNamespace(User=chat_user, Server=chat_server)
         source = SimpleNamespace(
             IsFromMe=is_from_me,
+            IsGroup=chat_server == "g.us" if is_group is None else is_group,
             Chat=chat,
             Sender=sender,
             SenderAlt=sender_alt,
@@ -92,9 +120,15 @@ def whatsapp_event_factory():
             Pushname=pushname,
             MessageSource=source,
         )
+        image_message = (
+            SimpleNamespace(caption=image_caption, mimetype=image_mime_type)
+            if image_caption is not None
+            else None
+        )
         message = SimpleNamespace(
             conversation=text,
             extendedTextMessage=SimpleNamespace(text=""),
+            imageMessage=image_message,
         )
         return SimpleNamespace(Info=info, Message=message)
 

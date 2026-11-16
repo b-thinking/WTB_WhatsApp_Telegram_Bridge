@@ -22,7 +22,7 @@ def test_load_configuration_reads_and_validates_environment(
     set_valid_environment(monkeypatch)
     monkeypatch.setattr(wtb, "load_dotenv", lambda _path: False)
     configured_levels: list[str] = []
-    monkeypatch.setattr(wtb, "configure_logging", configured_levels.append)
+    monkeypatch.setattr(wtb, "logging_configure", configured_levels.append)
 
     config = wtb.load_configuration()
 
@@ -68,13 +68,13 @@ def test_load_configuration_rejects_invalid_log_level(
         wtb.load_configuration()
 
 
-def test_configure_logging_forces_requested_level(
+def test_logging_configure_forces_requested_level(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[dict[str, Any]] = []
     monkeypatch.setattr(wtb.logging, "basicConfig", lambda **kwargs: calls.append(kwargs))
 
-    wtb.configure_logging("DEBUG")
+    wtb.logging_configure("DEBUG")
 
     assert calls[0]["level"] == logging.DEBUG
     assert calls[0]["force"] is True
@@ -85,7 +85,7 @@ def test_sigterm_handler_requests_the_graceful_shutdown_path() -> None:
         wtb.handle_sigterm(15, None)
 
 
-def test_initialize_database_creates_schema_and_recovers_processing_rows(
+def test_database_initialize_creates_schema_and_recovers_processing_rows(
     app_database: Any, caplog: pytest.LogCaptureFixture
 ) -> None:
     with app_database:
@@ -101,7 +101,7 @@ def test_initialize_database_creates_schema_and_recovers_processing_rows(
         )
 
     with caplog.at_level(logging.ERROR, logger="wtb"):
-        recovered_database = wtb.initialize_database()
+        recovered_database = wtb.database_initialize()
     try:
         statuses = {
             row["wa_message_id"]: row["status"]
@@ -115,30 +115,30 @@ def test_initialize_database_creates_schema_and_recovers_processing_rows(
         recovered_database.close()
 
 
-def test_get_registered_chat_id_returns_stored_chat(
+def test_telegram_get_registered_chat_id_returns_stored_chat(
     app_database: Any, registered_chat: int
 ) -> None:
-    assert wtb.get_registered_chat_id() == registered_chat
+    assert wtb.telegram_get_registered_chat_id() == registered_chat
 
 
-def test_get_registered_chat_id_returns_none_when_unregistered(
+def test_telegram_get_registered_chat_id_returns_none_when_unregistered(
     app_database: Any,
 ) -> None:
-    assert wtb.get_registered_chat_id() is None
+    assert wtb.telegram_get_registered_chat_id() is None
 
 
 def test_phone_normalization_removes_non_digits() -> None:
     assert wtb.normalize_phone_number("+34 (612) 345-678") == "34612345678"
 
 
-def test_message_text_supports_plain_and_extended_text() -> None:
+def test_whatsapp_message_text_supports_plain_and_extended_text() -> None:
     class Message:
         conversation = "  plain text  "
         extendedTextMessage = type("Extended", (), {"text": "extended"})()
 
-    assert wtb.message_text(Message()) == "plain text"
+    assert wtb.whatsapp_message_text(Message()) == "plain text"
     Message.conversation = ""
-    assert wtb.message_text(Message()) == "extended"
+    assert wtb.whatsapp_message_text(Message()) == "extended"
 
 
 def test_split_html_text_escapes_and_splits_without_breaking_entities() -> None:
@@ -148,13 +148,13 @@ def test_split_html_text_escapes_and_splits_without_breaking_entities() -> None:
     assert all(len(chunk) <= 5 for chunk in escaped_chunks)
 
 
-def test_format_jid_uses_user_and_server() -> None:
+def test_whatsapp_format_jid_uses_user_and_server() -> None:
     jid = type("JID", (), {"User": "34123456789", "Server": "s.whatsapp.net"})()
 
-    assert wtb.format_jid(jid) == "34123456789@s.whatsapp.net"
+    assert wtb.whatsapp_format_jid(jid) == "34123456789@s.whatsapp.net"
 
 
-def test_format_jid_falls_back_to_string() -> None:
+def test_whatsapp_format_jid_falls_back_to_string() -> None:
     jid = type("JID", (), {"User": "", "Server": ""})()
 
-    assert wtb.format_jid(jid) == str(jid)
+    assert wtb.whatsapp_format_jid(jid) == str(jid)

@@ -57,6 +57,7 @@ def test_telegram_request_hides_token_when_transport_fails(
         wtb.telegram_request("getUpdates", {})
 
     assert "secret-token" not in str(error.value)
+    assert "offline" in str(error.value)
 
 
 def test_telegram_request_raises_api_description(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -73,10 +74,38 @@ def test_telegram_request_raises_api_description(monkeypatch: pytest.MonkeyPatch
         wtb.telegram_request("sendMessage", {})
 
 
+def test_telegram_send_photo_uploads_multipart_image(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(wtb, "CONFIG", {"TELEGRAM_BOT_TOKEN": "test-token"})
+    captured: dict[str, Any] = {}
+
+    def fake_urlopen(request: Any, timeout: int) -> FakeResponse:
+        captured["url"] = request.full_url
+        captured["content_type"] = request.get_header("Content-type")
+        captured["body"] = request.data
+        captured["timeout"] = timeout
+        return FakeResponse({"ok": True, "result": {"message_id": 12}})
+
+    monkeypatch.setattr(wtb, "urlopen", fake_urlopen)
+    image_data = b"\x00\x01fake-image-data"
+
+    result = wtb.telegram_send_photo(123, "<b>Sender:</b> Alice", image_data, "image/jpeg")
+
+    assert result["result"]["message_id"] == 12
+    assert captured["url"].endswith("/bottest-token/sendPhoto")
+    assert captured["content_type"].startswith("multipart/form-data; boundary=")
+    assert b'name="chat_id"\r\n\r\n123' in captured["body"]
+    assert b'name="caption"\r\n\r\n<b>Sender:</b> Alice' in captured["body"]
+    assert b'filename="whatsapp-image.jpg"' in captured["body"]
+    assert image_data in captured["body"]
+    assert captured["timeout"] == 40
+
+
 def test_private_message_without_contact_requests_contact(
     app_database: Any, monkeypatch: pytest.MonkeyPatch, telegram_calls: list[Any]
 ) -> None:
-    wtb.process_telegram_update(
+    wtb.telegram_process_update(
         {
             "message": {
                 "chat": {"id": 100, "type": "private"},
@@ -89,13 +118,13 @@ def test_private_message_without_contact_requests_contact(
     assert telegram_calls[0][0] == "sendMessage"
     keyboard = telegram_calls[0][1]["reply_markup"]["keyboard"]
     assert keyboard[0][0]["request_contact"] is True
-    assert wtb.get_registered_chat_id() is None
+    assert wtb.telegram_get_registered_chat_id() is None
 
 
 def test_registration_rejects_contact_belonging_to_another_user(
     app_database: Any, telegram_calls: list[Any]
 ) -> None:
-    wtb.process_telegram_update(
+    wtb.telegram_process_update(
         {
             "message": {
                 "chat": {"id": 100, "type": "private"},
@@ -106,13 +135,13 @@ def test_registration_rejects_contact_belonging_to_another_user(
     )
 
     assert "share your own contact" in telegram_calls[0][1]["text"]
-    assert wtb.get_registered_chat_id() is None
+    assert wtb.telegram_get_registered_chat_id() is None
 
 
 def test_registration_rejects_phone_mismatch(
     app_database: Any, telegram_calls: list[Any]
 ) -> None:
-    wtb.process_telegram_update(
+    wtb.telegram_process_update(
         {
             "message": {
                 "chat": {"id": 100, "type": "private"},
@@ -123,13 +152,13 @@ def test_registration_rejects_phone_mismatch(
     )
 
     assert "phone numbers do not match" in telegram_calls[0][1]["text"]
-    assert wtb.get_registered_chat_id() is None
+    assert wtb.telegram_get_registered_chat_id() is None
 
 
 def test_registration_accepts_matching_user_and_phone(
     app_database: Any, telegram_calls: list[Any]
 ) -> None:
-    wtb.process_telegram_update(
+    wtb.telegram_process_update(
         {
             "message": {
                 "chat": {"id": 100, "type": "private"},
@@ -139,14 +168,14 @@ def test_registration_accepts_matching_user_and_phone(
         }
     )
 
-    assert wtb.get_registered_chat_id() == 100
+    assert wtb.telegram_get_registered_chat_id() == 100
     assert telegram_calls[-1][1]["text"].startswith("Registration complete")
 
 
 def test_registration_ignores_non_private_chats(
     app_database: Any, telegram_calls: list[Any], caplog: pytest.LogCaptureFixture
 ) -> None:
-    wtb.process_telegram_update(
+    wtb.telegram_process_update(
         {"message": {"chat": {"id": -100, "type": "group"}, "from": {"id": 1}}}
     )
 
@@ -157,7 +186,7 @@ def test_registration_ignores_non_private_chats(
 def test_registered_chat_is_not_replaced(
     app_database: Any, registered_chat: int, telegram_calls: list[Any]
 ) -> None:
-    wtb.process_telegram_update(
+    wtb.telegram_process_update(
         {
             "message": {
                 "chat": {"id": 999, "type": "private"},
@@ -167,7 +196,7 @@ def test_registered_chat_is_not_replaced(
         }
     )
 
-    assert wtb.get_registered_chat_id() == registered_chat
+    assert wtb.telegram_get_registered_chat_id() == registered_chat
     assert telegram_calls == []
 
 
@@ -190,7 +219,7 @@ def test_telegram_polling_persists_next_update_offset(
         raise PollFinished
 
     monkeypatch.setattr(wtb, "telegram_request", fake_request)
-    monkeypatch.setattr(wtb, "process_telegram_update", processed.append)
+    monkeypatch.setattr(wtb, "telegram_process_update", processed.append)
 
     with pytest.raises(PollFinished):
         wtb.telegram_polling_loop()
