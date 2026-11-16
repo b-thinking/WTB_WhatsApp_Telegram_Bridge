@@ -25,15 +25,15 @@ Environment=TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
 # Maximum SHM Memory Size
 ShmSize=1g
 
-# Podman stop Timeout (has to be higher than Telegram Poll Timeout: Default 40s
+# Podman stop Timeout: It has to be higher than Telegram Poll Timeout: Default 40s
 StopTimeout=60
 
 [Service]
 # Service stop Timeout. Has to be higher than pod stop timeout (see StopTimeout)
 TimeoutStopSec=70
-Restart=none
-# Restart=always 
-# RestartSec=60
+# Restart=none
+Restart=always 
+RestartSec=120
 
 [Install]
 WantedBy=default.target
