@@ -3,5 +3,13 @@
         "tests"
     ],
     "python.testing.unittestEnabled": false,
-    "python.testing.pytestEnabled": true
+    "python.testing.pytestEnabled": true,
+    "python-envs.pythonProjects": [
+        {
+            "path": ".",
+            "envManager": "ms-python.python:pyenv",
+            "packageManager": "ms-python.python:pip"
+        }
+    ],
+    "python.terminal.useEnvFile": true
 }
