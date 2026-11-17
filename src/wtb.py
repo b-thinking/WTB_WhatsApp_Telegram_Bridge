@@ -1,4 +1,4 @@
-"""Minimal WhatsApp-to-Telegram text and image bridge."""
+"""Minimal WhatsApp-to-Telegram text and media bridge."""
 
 from __future__ import annotations
 
@@ -14,8 +14,9 @@ import sqlite3
 import sys
 import threading
 import uuid
+from collections.abc import Callable, Iterable
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -35,6 +36,7 @@ CONFIG: dict[str, str] = {}
 TELEGRAM_TEXT_LIMIT = 4096
 TELEGRAM_CAPTION_LIMIT = 1024
 TELEGRAM_PHOTO_SIZE_LIMIT = 10_000_000
+TELEGRAM_VIDEO_SIZE_LIMIT = 50_000_000
 WHATSAPP_GROUP_NAME_CACHE: dict[str, str | None] = {}
 WHATSAPP_GROUP_NAME_CACHE_LOCK = threading.Lock()
 
@@ -111,6 +113,14 @@ def database_initialize() -> sqlite3.Connection:
             modified_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             UNIQUE (wa_chat_jid, wa_message_id)
         );
+        CREATE TABLE IF NOT EXISTS telegram_rejected_messages (
+            telegram_message_id INTEGER PRIMARY KEY,
+            telegram_answer_message_id INTEGER UNIQUE,
+            telegram_chat_id INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            modified_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
         """
     )
     with database:
@@ -118,9 +128,19 @@ def database_initialize() -> sqlite3.Connection:
             "UPDATE messages SET status = 'FAILED', modified_at = CURRENT_TIMESTAMP "
             "WHERE status = 'PROCESSING'"
         ).rowcount
+        rejected_messages = database.execute(
+            "UPDATE telegram_rejected_messages "
+            "SET status = 'FAILED', modified_at = CURRENT_TIMESTAMP "
+            "WHERE status = 'PROCESSING'"
+        ).rowcount
     if failed:
         LOGGER.error(
             "Marked %d interrupted message delivery attempt(s) as FAILED", failed
+        )
+    if rejected_messages:
+        LOGGER.error(
+            "Marked %d interrupted Telegram rejection response(s) as FAILED",
+            rejected_messages,
         )
     return database
 
@@ -167,16 +187,19 @@ def _telegram_transport_error(method: str, error: Exception) -> RuntimeError:
     return RuntimeError(f"Telegram API request failed ({method}): {detail}")
 
 
-def telegram_send_photo(
+def telegram_send_media(
+    method: str,
+    media_field: str,
     chat_id: int,
     caption: str,
-    image_data: bytes,
+    media_data: bytes,
     mime_type: str,
+    filename_stem: str,
 ) -> dict[str, Any]:
-    """Upload a photo to Telegram using multipart form data."""
+    """Upload a media file to Telegram using multipart form data."""
     boundary = f"wtb-{uuid.uuid4().hex}"
-    extension = mimetypes.guess_extension(mime_type, strict=False) or ".jpg"
-    filename = f"whatsapp-image{extension}"
+    extension = mimetypes.guess_extension(mime_type, strict=False) or ".bin"
+    filename = f"{filename_stem}{extension}"
     fields = {
         "chat_id": str(chat_id),
         "caption": caption,
@@ -196,17 +219,17 @@ def telegram_send_photo(
         [
             f"--{boundary}\r\n".encode(),
             (
-                f'Content-Disposition: form-data; name="photo"; '
+                f'Content-Disposition: form-data; name="{media_field}"; '
                 f'filename="{filename}"\r\n'
             ).encode(),
             f"Content-Type: {mime_type}\r\n\r\n".encode(),
-            image_data,
+            media_data,
             b"\r\n",
             f"--{boundary}--\r\n".encode(),
         ]
     )
     request = Request(
-        f"https://api.telegram.org/bot{CONFIG['TELEGRAM_BOT_TOKEN']}/sendPhoto",
+        f"https://api.telegram.org/bot{CONFIG['TELEGRAM_BOT_TOKEN']}/{method}",
         data=b"".join(parts),
         headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
         method="POST",
@@ -215,11 +238,44 @@ def telegram_send_photo(
         with urlopen(request, timeout=40) as response:
             result = json.loads(response.read().decode("utf-8"))
     except (HTTPError, URLError, TimeoutError, json.JSONDecodeError, OSError) as error:
-        raise _telegram_transport_error("sendPhoto", error) from None
+        raise _telegram_transport_error(method, error) from None
     if not result.get("ok"):
         description = result.get("description", "unknown error")
-        raise RuntimeError(f"Telegram API sendPhoto failed: {description}")
+        raise RuntimeError(f"Telegram API {method} failed: {description}")
     return result
+
+
+def telegram_send_photo(
+    chat_id: int, caption: str, image_data: bytes, mime_type: str
+) -> dict[str, Any]:
+    """Upload a photo to Telegram."""
+    return telegram_send_media(
+        "sendPhoto", "photo", chat_id, caption, image_data, mime_type, "whatsapp-image"
+    )
+
+
+def telegram_send_video(
+    chat_id: int, caption: str, video_data: bytes, mime_type: str
+) -> dict[str, Any]:
+    """Upload a video to Telegram."""
+    return telegram_send_media(
+        "sendVideo", "video", chat_id, caption, video_data, mime_type, "whatsapp-video"
+    )
+
+
+def telegram_send_animation(
+    chat_id: int, caption: str, video_data: bytes, mime_type: str
+) -> dict[str, Any]:
+    """Upload a video with GIF playback to Telegram as an animation."""
+    return telegram_send_media(
+        "sendAnimation",
+        "animation",
+        chat_id,
+        caption,
+        video_data,
+        mime_type,
+        "whatsapp-animation",
+    )
 
 
 def telegram_get_registered_chat_id() -> int | None:
@@ -253,7 +309,7 @@ def normalize_phone_number(number: str) -> str:
 
 
 def telegram_process_update(update: dict[str, Any]) -> None:
-    """Process a registration update; the MVP has no Telegram reply handling."""
+    """Process Telegram registration and messages from the registered chat."""
     message = update.get("message")
     if not message:
         return
@@ -263,7 +319,12 @@ def telegram_process_update(update: dict[str, Any]) -> None:
     if chat.get("type") != "private" or not chat_id:
         LOGGER.warning("Ignoring Telegram messages outside a private chat")
         return
-    if telegram_get_registered_chat_id() is not None:
+    registered_chat_id = telegram_get_registered_chat_id()
+    if registered_chat_id is not None:
+        if chat_id != registered_chat_id:
+            LOGGER.warning("Ignoring Telegram message from an unregistered chat")
+            return
+        telegram_process_registered_message(message, registered_chat_id)
         return
 
     contact = message.get("contact")
@@ -302,10 +363,117 @@ def telegram_process_update(update: dict[str, Any]) -> None:
         "sendMessage",
         {
             "chat_id": chat_id,
-            "text": "Registration complete. WhatsApp text messages will be forwarded here.",
+            "text": "Registration complete. WhatsApp messages will be forwarded here.",
         },
     )
     LOGGER.info("Telegram chat registration completed")
+
+
+def telegram_rejected_message_exists(chat_id: int, message_id: int) -> bool:
+    """Return whether an ID belongs to a rejected message or its bot response."""
+    assert DATABASE is not None
+    row = DATABASE.execute(
+        "SELECT 1 FROM telegram_rejected_messages "
+        "WHERE telegram_chat_id = ? "
+        "AND (telegram_message_id = ? OR telegram_answer_message_id = ?)",
+        (chat_id, message_id, message_id),
+    ).fetchone()
+    return row is not None
+
+
+def telegram_message_was_forwarded(chat_id: int, message_id: int) -> bool:
+    """Return whether a Telegram message ID maps to a delivered WhatsApp message."""
+    assert DATABASE is not None
+    row = DATABASE.execute(
+        "SELECT 1 FROM messages WHERE telegram_chat_id = ? "
+        "AND telegram_message_id = ? AND status = 'SENT'",
+        (chat_id, message_id),
+    ).fetchone()
+    return row is not None
+
+
+def telegram_process_registered_message(message: dict[str, Any], chat_id: int) -> None:
+    """Reject standalone messages and recognize replies to prior bridge messages."""
+    message_id = message.get("message_id")
+    reply = message.get("reply_to_message")
+    if reply is not None:
+        replied_to_id = reply.get("message_id")
+        if replied_to_id is None:
+            LOGGER.warning(
+                "Ignoring Telegram reply %s without a replied-to message ID", message_id
+            )
+            return
+        if telegram_rejected_message_exists(chat_id, replied_to_id):
+            LOGGER.warning(
+                "Ignoring Telegram reply %s to rejected standalone message %s",
+                message_id,
+                replied_to_id,
+            )
+        elif telegram_message_was_forwarded(chat_id, replied_to_id):
+            LOGGER.info(
+                "Received Telegram reply %s to a forwarded WhatsApp message; "
+                "reply forwarding is not implemented yet",
+                message_id,
+            )
+        else:
+            LOGGER.warning(
+                "Ignoring Telegram reply %s because message %s was not forwarded "
+                "from WhatsApp",
+                message_id,
+                replied_to_id,
+            )
+        return
+
+    if message_id is None:
+        LOGGER.warning("Ignoring a standalone Telegram message without a message ID")
+        return
+
+    assert DATABASE is not None
+    with DATABASE_LOCK, DATABASE:
+        cursor = DATABASE.execute(
+            "INSERT OR IGNORE INTO telegram_rejected_messages "
+            "(telegram_message_id, telegram_chat_id, status) "
+            "VALUES (?, ?, 'PROCESSING')",
+            (message_id, chat_id),
+        )
+    if cursor.rowcount == 0:
+        LOGGER.debug("Ignoring replayed standalone Telegram message %s", message_id)
+        return
+
+    LOGGER.warning(
+        "Rejecting standalone Telegram message %s; only replies to previously "
+        "forwarded WhatsApp messages are accepted",
+        message_id,
+    )
+    try:
+        result = telegram_request(
+            "sendMessage",
+            {
+                "chat_id": chat_id,
+                "text": (
+                    "Standalone messages are not allowed. Only replies to messages "
+                    "previously forwarded from WhatsApp are accepted."
+                ),
+            },
+        )["result"]
+        answer_message_id = result["message_id"]
+    except Exception:
+        with DATABASE_LOCK, DATABASE:
+            DATABASE.execute(
+                "UPDATE telegram_rejected_messages "
+                "SET status = 'FAILED', modified_at = CURRENT_TIMESTAMP "
+                "WHERE telegram_message_id = ?",
+                (message_id,),
+            )
+        raise
+
+    with DATABASE_LOCK, DATABASE:
+        DATABASE.execute(
+            "UPDATE telegram_rejected_messages "
+            "SET telegram_answer_message_id = ?, status = 'SENT', "
+            "modified_at = CURRENT_TIMESTAMP WHERE telegram_message_id = ?",
+            (answer_message_id, message_id),
+        )
 
 
 def telegram_polling_loop() -> None:
@@ -340,6 +508,27 @@ def whatsapp_message_text(message: Any) -> str:
     return text.strip()
 
 
+def whatsapp_get_message_field(message: Any, field_name: str) -> Any | None:
+    """Return a protobuf submessage only when the field is present."""
+    has_field = getattr(message, "HasField", None)
+    if callable(has_field):
+        try:
+            if not has_field(field_name):
+                return None
+        except (TypeError, ValueError):
+            pass
+    return getattr(message, field_name, None)
+
+
+def whatsapp_present_message_fields(message: Any) -> list[str]:
+    """Return names of populated protobuf message fields without their contents."""
+    list_fields = getattr(message, "ListFields", None)
+    if not callable(list_fields):
+        return []
+    get_fields = cast(Callable[[], Iterable[tuple[Any, Any]]], list_fields)
+    return [field.name for field, _value in get_fields()]
+
+
 def split_html_text(text: str, max_length: int) -> list[str]:
     """Split escaped text without breaking HTML entities."""
     chunks: list[str] = []
@@ -357,6 +546,8 @@ def split_html_text(text: str, max_length: int) -> list[str]:
 
 def whatsapp_format_jid(jid: Any) -> str:
     """Format a Neonize JID as a stable string."""
+    if getattr(jid, "IsEmpty", False):
+        return ""
     user = getattr(jid, "User", "")
     server = getattr(jid, "Server", "")
     if user and server:
@@ -388,7 +579,7 @@ def whatsapp_get_group_name(client: NewClient, group_jid: Any) -> str | None:
 
 #region: Neonize event handlers
 def on_whatsapp_message(client: NewClient, event: MessageEv) -> None:
-    """Persist and forward one incoming WhatsApp text or image message."""
+    """Persist and forward one incoming WhatsApp text or media message."""
     try:
         source = event.Info.MessageSource
         if getattr(source, "IsFromMe", False):
@@ -400,7 +591,9 @@ def on_whatsapp_message(client: NewClient, event: MessageEv) -> None:
         is_broadcast = chat_server == "broadcast" or bool(
             getattr(broadcast_owner, "User", "")
         )
-        is_group = chat_server == "g.us" or getattr(source, "IsGroup", False)
+        is_group = not is_broadcast and (
+            chat_server == "g.us" or getattr(source, "IsGroup", False)
+        )
         if is_group or is_broadcast:
             conversation_type = "broadcast" if is_broadcast else "group"
             group_name = (
@@ -425,12 +618,39 @@ def on_whatsapp_message(client: NewClient, event: MessageEv) -> None:
                 whatsapp_format_jid(broadcast_owner) if broadcast_owner else "",
             )
             return
-        image_message = getattr(event.Message, "imageMessage", None)
+        image_message = whatsapp_get_message_field(event.Message, "imageMessage")
+        video_message = whatsapp_get_message_field(event.Message, "videoMessage")
+        media_message = image_message or video_message
+        if image_message is not None:
+            media_kind = "image"
+            telegram_media_sender = telegram_send_photo
+            media_size_limit = TELEGRAM_PHOTO_SIZE_LIMIT
+            default_mime_type = "image/jpeg"
+        elif video_message is not None:
+            media_kind = "video"
+            is_animation = bool(getattr(video_message, "gifPlayback", False))
+            telegram_media_sender = (
+                telegram_send_animation if is_animation else telegram_send_video
+            )
+            media_size_limit = TELEGRAM_VIDEO_SIZE_LIMIT
+            default_mime_type = "video/mp4"
+        else:
+            media_kind = ""
+            telegram_media_sender = None
+            media_size_limit = 0
+            default_mime_type = ""
         text = whatsapp_message_text(event.Message)
-        if image_message is not None and not text:
-            text = getattr(image_message, "caption", "") or ""
-        if not text and image_message is None:
-            LOGGER.debug("Ignoring a WhatsApp message without supported content")
+        if media_message is not None and not text:
+            text = getattr(media_message, "caption", "") or ""
+        if not text and media_message is None:
+            LOGGER.debug(
+                "Ignoring WhatsApp message without supported content: "
+                "message_id=%r whatsapp_type=%r media_type=%r populated_fields=%s",
+                getattr(event.Info, "ID", ""),
+                getattr(event.Info, "Type", ""),
+                getattr(event.Info, "MediaType", ""),
+                whatsapp_present_message_fields(event.Message),
+            )
             return
 
         telegram_chat_id = telegram_get_registered_chat_id()
@@ -495,15 +715,16 @@ def on_whatsapp_message(client: NewClient, event: MessageEv) -> None:
         header = f"<b>Sender:</b> {html.escape(sender_name)}\n"
         original_id = f"\n\nWhatsApp message ID: {html.escape(wa_message_id)}"
         first_message_id: int | None = None
-        if image_message is not None:
-            image_data = client.download_any(event.Message)
-            if not image_data:
-                raise RuntimeError("WhatsApp image download returned no data")
-            mime_type = getattr(image_message, "mimetype", "") or "image/jpeg"
+        if media_message is not None:
+            media_data = client.download_any(event.Message)
+            if not media_data:
+                raise RuntimeError(f"WhatsApp {media_kind} download returned no data")
+            mime_type = getattr(media_message, "mimetype", "") or default_mime_type
 
-            if len(image_data) > TELEGRAM_PHOTO_SIZE_LIMIT:
+            if len(media_data) > media_size_limit:
                 LOGGER.warning(
-                    "Image in WhatsApp message %s exceeds Telegram's photo upload limit",
+                    "%s in WhatsApp message %s exceeds Telegram's upload limit",
+                    media_kind.capitalize(),
                     wa_message_id,
                 )
                 warning = "\n\nAttachment too large to forward"
@@ -535,8 +756,9 @@ def on_whatsapp_message(client: NewClient, event: MessageEv) -> None:
                     overflow_chunks = split_html_text(text, max_body_length)
                     photo_caption = header.rstrip()
 
-                result = telegram_send_photo(
-                    telegram_chat_id, photo_caption, image_data, mime_type
+                assert telegram_media_sender is not None
+                result = telegram_media_sender(
+                    telegram_chat_id, photo_caption, media_data, mime_type
                 )["result"]
                 first_message_id = result["message_id"]
                 if overflow_chunks is not None:

@@ -99,6 +99,11 @@ def test_database_initialize_creates_schema_and_recovers_processing_rows(
             "(wa_message_id, wa_chat_jid, direction, status) "
             "VALUES ('done', '34111111111@s.whatsapp.net', 'WHATSAPP_TO_TELEGRAM', 'SENT')"
         )
+        app_database.execute(
+            "INSERT INTO telegram_rejected_messages "
+            "(telegram_message_id, telegram_chat_id, status) "
+            "VALUES (501, 123456, 'PROCESSING')"
+        )
 
     with caplog.at_level(logging.ERROR, logger="wtb"):
         recovered_database = wtb.database_initialize()
@@ -111,6 +116,12 @@ def test_database_initialize_creates_schema_and_recovers_processing_rows(
         }
         assert statuses == {"unfinished": "FAILED", "done": "SENT"}
         assert "interrupted message delivery" in caplog.text
+        rejected_status = recovered_database.execute(
+            "SELECT status FROM telegram_rejected_messages "
+            "WHERE telegram_message_id = 501"
+        ).fetchone()["status"]
+        assert rejected_status == "FAILED"
+        assert "interrupted Telegram rejection response" in caplog.text
     finally:
         recovered_database.close()
 

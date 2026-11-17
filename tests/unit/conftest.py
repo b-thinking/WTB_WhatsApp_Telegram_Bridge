@@ -61,7 +61,7 @@ def telegram_calls(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, dict[str,
 
 @pytest.fixture
 def telegram_operations(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, Any]]:
-    """Record Telegram text and photo requests in their send order."""
+    """Record Telegram text and media requests in their send order."""
     operations: list[tuple[str, Any]] = []
 
     def fake_request(
@@ -78,8 +78,26 @@ def telegram_operations(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, Any]
         )
         return {"ok": True, "result": {"message_id": 700 + len(operations)}}
 
+    def fake_send_video(
+        chat_id: int, caption: str, video_data: bytes, mime_type: str
+    ) -> dict[str, Any]:
+        operations.append(
+            ("sendVideo", (chat_id, caption, video_data, mime_type))
+        )
+        return {"ok": True, "result": {"message_id": 700 + len(operations)}}
+
+    def fake_send_animation(
+        chat_id: int, caption: str, video_data: bytes, mime_type: str
+    ) -> dict[str, Any]:
+        operations.append(
+            ("sendAnimation", (chat_id, caption, video_data, mime_type))
+        )
+        return {"ok": True, "result": {"message_id": 700 + len(operations)}}
+
     monkeypatch.setattr(wtb, "telegram_request", fake_request)
     monkeypatch.setattr(wtb, "telegram_send_photo", fake_send_photo)
+    monkeypatch.setattr(wtb, "telegram_send_video", fake_send_video)
+    monkeypatch.setattr(wtb, "telegram_send_animation", fake_send_animation)
     return operations
 
 
@@ -102,6 +120,9 @@ def whatsapp_event_factory():
         is_group: bool | None = None,
         image_caption: str | None = None,
         image_mime_type: str = "image/jpeg",
+        video_caption: str | None = None,
+        video_mime_type: str = "video/mp4",
+        gif_playback: bool = False,
     ) -> Any:
         sender = SimpleNamespace(User=sender_user, Server=sender_server)
         sender_alt = SimpleNamespace(
@@ -125,10 +146,20 @@ def whatsapp_event_factory():
             if image_caption is not None
             else None
         )
+        video_message = (
+            SimpleNamespace(
+                caption=video_caption,
+                mimetype=video_mime_type,
+                gifPlayback=gif_playback,
+            )
+            if video_caption is not None
+            else None
+        )
         message = SimpleNamespace(
             conversation=text,
             extendedTextMessage=SimpleNamespace(text=""),
             imageMessage=image_message,
+            videoMessage=video_message,
         )
         return SimpleNamespace(Info=info, Message=message)
 

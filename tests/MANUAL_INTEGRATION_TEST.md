@@ -5,9 +5,10 @@ accounts. Record the date, build/image tag, test result, and relevant log or
 message IDs for each run. Do not include bot tokens or authentication data in
 test evidence.
 
-**Current implementation:** incoming WhatsApp text forwarding and Telegram
-registration are available. Attachment forwarding and Telegram-to-WhatsApp
-replies are not implemented yet; those cases are listed for later phases.
+**Current implementation:** Telegram registration, standalone-message
+rejection, and incoming WhatsApp text, image, and video forwarding are
+available. Telegram-to-WhatsApp reply forwarding and other attachment types
+are not implemented yet; those cases are listed for later phases.
 
 ## Setup, registration, and persistence
 
@@ -45,9 +46,9 @@ replies are not implemented yet; those cases are listed for later phases.
 
 - [x] **I-27 — Simple image**: Send one image. Confirm it arrives as a Telegram photo with the sender header.
 - [x] **I-28 — Image with caption**: Send an image with a short caption. Confirm sender information and caption are preserved.
-- [x] **I-29 — Image with text beyond caption limit**: Send an image with text exceeding Telegram's caption limit. Confirm the full text is sent separately before the attachment.
-- [ ] **I-30 — Simple video**: Send one video. Confirm it arrives as a Telegram video with the sender header.
-- [ ] **I-31 — GIF/animation**: Send a WhatsApp video with GIF playback enabled. Confirm Telegram receives it as an animation.
+- [x] **I-29 — Image with text beyond caption limit**: Send an image with text exceeding Telegram's caption limit. Confirm the image arrives first, followed by the full text in Telegram-sized chunks.
+- [x] **I-30 — Simple video**: Send one video. Confirm it arrives as a Telegram video with the sender header.
+- [x] **I-31 — GIF/animation**: Send a WhatsApp video with GIF playback enabled. Confirm Telegram receives it as an animation.
 - [ ] **I-32 — Document**: Send a document. Confirm it arrives with its filename and MIME type preserved.
 - [ ] **I-33 — Voice note**: Send a PTT voice note. Confirm Telegram receives it as a voice message.
 - [ ] **I-34 — Audio file**: Send a non-PTT audio file. Confirm Telegram receives it as audio rather than a voice note.
@@ -56,14 +57,13 @@ replies are not implemented yet; those cases are listed for later phases.
 - [ ] **I-37 — Contact card**: Send a WhatsApp contact. Confirm Telegram receives the contact label and name where available.
 - [ ] **I-38 — Attachment larger than Telegram's supported upload size**: Send an oversized attachment. Confirm the attachment is omitted, the text is still delivered, and `Attachment too large to forward` is reported.
 - [ ] **I-39 — Multiple WhatsApp attachments**: Send a message containing multiple attachments. This remains a pending product decision; record the observed event shape and agree on expected ordering/grouping before marking it passed.
-- [ ] **I-40 — Attachment plus long text**: Send an attachment with text exceeding the caption limit. Confirm the entire text is sent separately, followed by the attachment.
+- [ ] **I-40 — Attachment plus long text**: Send a supported attachment with text exceeding the caption limit. Confirm the attachment arrives first, followed by the full text in Telegram-sized chunks.
 - [ ] **I-41 — WhatsApp reply context**: Reply to a WhatsApp message with text or an attachment. Confirm the Telegram message references the original WhatsApp message where supported.
 
 ## Telegram replies to WhatsApp — later phase
 
 - [ ] **I-42 — Text reply**: Reply in Telegram to a forwarded WhatsApp text. Confirm the reply is sent to the correct WhatsApp chat and quotes the original WhatsApp message.
 - [ ] **I-43 — Reply to non-existent mapping**: Reply to a Telegram message with no stored WhatsApp mapping. Confirm it is ignored and a warning is logged.
-- [ ] **I-44 — Telegram message that is not a reply**: Send a normal message to the bot. Confirm it is ignored with a warning.
 - [ ] **I-45 — Photo reply**: Reply with a Telegram photo. Confirm the largest photo is sent to WhatsApp.
 - [ ] **I-46 — Video reply**: Reply with a Telegram video. Confirm it is sent to WhatsApp as video.
 - [ ] **I-47 — Animation reply**: Reply with a Telegram animation. Confirm it is sent to WhatsApp with GIF playback enabled.
@@ -83,3 +83,10 @@ replies are not implemented yet; those cases are listed for later phases.
 - [x] **I-58 — Ctrl+C shutdown**: Stop a local run with Ctrl+C. Confirm it logs a normal shutdown, stops Neonize, closes SQLite, and exits without a traceback.
 - [ ] **I-59 — Container SIGTERM shutdown**: Stop the Quadlet service/container normally. Confirm SIGTERM triggers the same cleanup path, the process exits before `StopTimeout=60`, and no SQLite or Neonize corruption appears after restart.
 - [ ] **I-60 — Sensitive values are absent from logs**: Review startup, pairing, message, error, and shutdown logs. Confirm no Telegram token or WhatsApp authentication data is present; the pairing code appears only while registration is pending.
+
+## Telegram standalone messages — current implementation
+
+- [x] **I-61 — Standalone text message**: After Telegram registration, send a text message without using Reply. Confirm a warning is logged, the bot explains that only replies to previously forwarded WhatsApp messages are accepted, and the incoming Telegram message ID and bot answer ID are stored in SQLite. Confirm nothing is sent to WhatsApp.
+- [x] **I-62 — Standalone media message**: After registration, send a photo or other media without using Reply. Confirm it is rejected in the same way as a standalone text message and both Telegram message IDs are recorded.
+- [x] **I-63 — Replayed standalone update**: Replay the same standalone Telegram update in a controlled test environment. Confirm the bot does not send a second rejection response.
+- [x] **I-64 — Reply to a rejected standalone message**: Reply to the original standalone message and to the bot's rejection response. Confirm both replies are ignored, no additional rejection response is sent, and no message is sent to WhatsApp. Restart the service before repeating to confirm the rejection records persist.

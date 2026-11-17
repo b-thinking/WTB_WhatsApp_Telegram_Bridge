@@ -7,12 +7,28 @@ import sqlite3
 from typing import Any
 
 import pytest
+from neonize.client import Message as WhatsAppMessage
 
 from src import wtb
 
 
 def message_rows(database: Any) -> list[Any]:
     return database.execute("SELECT * FROM messages ORDER BY record_id").fetchall()
+
+
+def test_whatsapp_get_message_field_checks_protobuf_presence() -> None:
+    message = WhatsAppMessage()
+
+    assert wtb.whatsapp_get_message_field(message, "videoMessage") is None
+
+    message.videoMessage.caption = "video caption"
+    assert wtb.whatsapp_get_message_field(message, "videoMessage") is message.videoMessage
+
+
+def test_whatsapp_format_jid_omits_an_empty_protobuf_jid() -> None:
+    jid = type("JID", (), {"IsEmpty": True, "User": "", "Server": ""})()
+
+    assert wtb.whatsapp_format_jid(jid) == ""
 
 
 def test_forwards_message_with_pushname_and_original_id(
@@ -105,14 +121,41 @@ def test_ignored_broadcast_message_logs_broadcast_type(
     whatsapp_event_factory: Any,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    event = whatsapp_event_factory(chat_user="status", chat_server="broadcast")
+    event = whatsapp_event_factory(
+        chat_user="status", chat_server="broadcast", is_group=True
+    )
+    group_lookups: list[Any] = []
+
+    def get_group_info(_self: Any, _jid: Any) -> None:
+        group_lookups.append(_jid)
+
+    client = type("Client", (), {"get_group_info": get_group_info})()
 
     with caplog.at_level(logging.DEBUG, logger="wtb"):
-        wtb.on_whatsapp_message(None, event)
+        wtb.on_whatsapp_message(client, event)
 
     assert "Ignoring WhatsApp broadcast message" in caplog.text
     assert "chat_jid=status@broadcast" in caplog.text
     assert "group_name=None" in caplog.text
+    assert "broadcast_list_owner=" in caplog.text
+    assert "RawAgent:" not in caplog.text
+    assert group_lookups == []
+
+
+def test_unsupported_whatsapp_content_logs_populated_field_names(
+    app_database: Any,
+    whatsapp_event_factory: Any,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    event = whatsapp_event_factory(text="")
+    event.Message = WhatsAppMessage()
+    event.Message.audioMessage.mimetype = "audio/ogg"
+
+    with caplog.at_level(logging.DEBUG, logger="wtb"):
+        wtb.on_whatsapp_message(None, event)
+
+    assert "without supported content" in caplog.text
+    assert "populated_fields=['audioMessage']" in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -223,6 +266,58 @@ def test_forwards_image_caption_in_telegram_photo_caption(
     assert method == "sendPhoto"
     assert "<b>Sender:</b> Alice &amp; Bob" in photo[1]
     assert "A caption" in photo[1]
+
+
+def test_forwards_video_as_telegram_video_with_sender_header(
+    app_database: Any,
+    registered_chat: int,
+    telegram_operations: list[tuple[str, Any]],
+    whatsapp_event_factory: Any,
+) -> None:
+    video_data = b"fake-mp4-data"
+    event = whatsapp_event_factory(
+        text="", video_caption="", video_mime_type="video/mp4", pushname="Alice"
+    )
+    client = type("Client", (), {"download_any": lambda _self, _message: video_data})()
+
+    wtb.on_whatsapp_message(client, event)
+
+    assert len(telegram_operations) == 1
+    method, video = telegram_operations[0]
+    assert method == "sendVideo"
+    assert video[0] == registered_chat
+    assert "<b>Sender:</b> Alice" in video[1]
+    assert "WhatsApp message ID: wa-message-1" in video[1]
+    assert video[2:] == (video_data, "video/mp4")
+    assert message_rows(app_database)[0]["status"] == "SENT"
+
+
+def test_forwards_gif_playback_video_as_telegram_animation(
+    app_database: Any,
+    registered_chat: int,
+    telegram_operations: list[tuple[str, Any]],
+    whatsapp_event_factory: Any,
+) -> None:
+    video_data = b"fake-animation-data"
+    event = whatsapp_event_factory(
+        text="",
+        video_caption="",
+        video_mime_type="video/mp4",
+        gif_playback=True,
+        pushname="Alice",
+    )
+    client = type("Client", (), {"download_any": lambda _self, _message: video_data})()
+
+    wtb.on_whatsapp_message(client, event)
+
+    assert len(telegram_operations) == 1
+    method, animation = telegram_operations[0]
+    assert method == "sendAnimation"
+    assert animation[0] == registered_chat
+    assert "<b>Sender:</b> Alice" in animation[1]
+    assert "WhatsApp message ID: wa-message-1" in animation[1]
+    assert animation[2:] == (video_data, "video/mp4")
+    assert message_rows(app_database)[0]["status"] == "SENT"
 
 
 def test_long_image_caption_is_sent_as_photo_then_text_chunks(
