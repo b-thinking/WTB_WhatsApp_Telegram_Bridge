@@ -211,6 +211,10 @@ __marimo__/
 # JMA: Data folder
 data/
 
+# JMA: Environment file for production
+.env.prod
+
+
 
 
 
