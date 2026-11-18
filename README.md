@@ -1,67 +1,125 @@
 # WhatsApp–Telegram Bridge
 
-The initial version links one WhatsApp account to one Telegram private chat and
-forwards incoming WhatsApp text messages to that chat. It uses Neonize for
-WhatsApp and Telegram's Bot API over the Python standard library's `urllib`.
+WhatsApp-Telegram Bridge connects a WhatsApp account to one registered Telegram
+private chat. It forwards incoming WhatsApp text, images, videos, and GIF-style
+animations to Telegram. Replies in Telegram can be sent to the original WhatsApp
+chat as text, photos, videos, or animations. The bridge uses Neonize for WhatsApp
+and Telegram's Bot API through Python's standard-library `urllib`.
 
-This version covers the first development phase only. Attachments and replies
-from Telegram to WhatsApp are not implemented yet.
+## Quick start
 
-## Requirements
+### Requirements
+
+#### Telegram Bot
+
+Before first use, create or select a Telegram bot. Anyone who knows the bot's
+username can start a chat with it. The registration flow restricts bridge use to
+the Telegram account that shares the matching phone number.
+
+To create a bot:
+
+- Search for and open [BotFather](https://core.telegram.org/bots#botfather) in Telegram.
+- Send `/newbot` to create a new bot.
+  - Choose a display name, such as `WhatsApp`.
+  - Choose an available username that meets Telegram's requirements and ends in `bot`.
+  - Copy the API token into your environment as `TELEGRAM_BOT_TOKEN`. Keep it private.
+
+#### WhatsApp account and app
+
+You need an active WhatsApp account and a mobile phone with the WhatsApp app
+installed to link the bridge. WhatsApp may log out linked devices after 14 days
+of primary-phone inactivity. See [WhatsApp's linked devices guide](https://faq.whatsapp.com/378279804439436/?cms_platform=android&helpref=hc_fnav).
+
+### Run the container
+
+To run the packaged application, use a container runtime such as
+[Docker Desktop](https://www.docker.com/products/docker-desktop/) or
+[Podman](https://podman.io/).
+
+#### Create a local folder
+
+The application stores persistent data in this folder, including the WhatsApp
+pairing session and SQLite database.
+
+```sh
+mkdir -p "$HOME/.wtb/data"
+```
+
+#### Run the application
+
+```sh
+podman run --rm --name "wtb-bot" \
+    -e LOG_LEVEL="INFO" \
+    -e TELEGRAM_BOT_TOKEN="<YOUR-TELEGRAM-BOT-TOKEN>" \
+    -e PHONE_NUMBER="34123456789" \
+    -v "$HOME/.wtb/data:/app/data" \
+    ghcr.io/b-thinking/wtb-bot:latest
+```
+
+This example uses Podman. To use Docker, replace `podman` with `docker`.
+
+Replace the example token and phone number with your own values. Use the
+international phone number with 8–15 digits and no leading `+`.
+
+On Podman systems using SELinux, the volume may need the `:Z` label option. In a
+rootless user-namespace setup, `:U` may also be needed to map ownership to the
+container user. For example, use
+`-v "$HOME/.wtb/data:/app/data:Z,U"`. The `:U` option changes ownership of the
+host directory and its contents.
+
+#### First startup
+
+- The pairing code appears in the console. In WhatsApp, enter it under **Settings → Linked Devices → Link a Device → Link with phone number instead**.
+- Open a private chat with the bot and send a message. The bot asks you to share your phone number; tap the contact-sharing button.
+
+## Development setup
 
 - Python 3.11
-- A Telegram bot token from [BotFather](https://core.telegram.org/bots#botfather)
-- A WhatsApp account that can link a device using a phone number
+- `pyenv` and `pyenv-virtualenv` to use the provided environment script
+- FFmpeg and libmagic for local video and image handling (the container image includes these)
+- A Telegram bot token from [BotFather](https://core.telegram.org/bots#botfather). See [Quick start - Requirements](#telegram-bot)
+- A WhatsApp account that can link a device using a phone number. See [Quick start - Requirements](#whatsapp-account-and-app)
 
-The application dependencies are pinned in `requirements.txt`. Neonize publishes a Python-independent wheel `neonize` and supports the Python 3.11 runtime used by this project. `python-dotenv` loads local development settings from `.env`.
+Runtime dependencies are pinned in `requirements.txt`. `python-dotenv` loads
+local development settings from `.env`.
 
-Additional depencencies for development are in `requirements-dev.txt`, including `pytest` and `ruff`.
+Additional development dependencies are listed in `requirements-dev.txt`,
+including `pytest` and `ruff`.
 
-## Prerequisites
-
-### Telegram Bot
-
-Before first use, create or select a Telegram bot. NOTICE: The bot can be used in a private chat, but its username can still be found in Telegram. The registration flow is what restricts the bridge to the matching phone number.
-
-For creating the bot:
-
-- Open [BotFather](https://core.telegram.org/bots#botfather) as contact in Telegram.
-- Send `/newbot` to create a new bot.
-  - Use "WhatsApp" as bot displayname
-  - Type your bot name. The username must be available, 5–32 characters, case-insensitive, use Latin letters, digits, or underscores, and end in "bot".
-  - Notice and annotate the API key. Add it to your environment as `TELEGRAM_BOT_TOKEN`. Keep the BotFather token private.
-
-### WhatsApp account and App
-
-Also, initial use requires a WhatsApp account with a phone number active. For registration, you need a mobile phone with the WhatsApp app installed. WhatsApp says linked devices can log out after 14 days of primary-phone inactivity, so be sure to check the WhatsApp app in the phone every 14 days. See [WhatsApp’s linked devices guide](https://faq.whatsapp.com/378279804439436/?cms_platform=android&helpref=hc_fnav)
-
-## Configuration
+### Configuration
 
 Set these variables in the process environment or in a local `.env` file at the
-project root:
+project root. Keep real bot tokens private; `.env` is ignored by Git.
 
 ```dotenv
+# Application settings
 LOG_LEVEL=INFO
 TELEGRAM_BOT_TOKEN=your-telegram-bot-token
 PHONE_NUMBER=34123456789
+
+# Used by scripts/configure-pyenv.sh
+PYTHON_VERSION=3.11
+PYENV_ENV_NAME=wtb
 ```
 
 `PHONE_NUMBER` must contain the WhatsApp account's international phone number
 as digits only, without a leading `+`. The application exits with status 1 if a
 required value is missing or invalid.
 
-## Install and run
+### Create an environment and run the Python script locally
 
-The current version uses pyenv as virtual environment. The environment is configured using script in `scripts/configure-pyenv.sh`. For using it:
+The provided setup script uses `pyenv-virtualenv` to create and activate the
+project environment, then installs the runtime and development dependencies.
+To use it:
 
-- You need pyenv and pyenv-virtualenv installed
-- Declare `PYTHON_VERSION` and `PYENV_ENV_NAME` in `.env`. Be sure that version is 3.11+.
+- Install `pyenv` and `pyenv-virtualenv`.
+- Set `PYTHON_VERSION` (use `3.11`) and `PYENV_ENV_NAME` in `.env`.
 
-NOTICE: This is approach is not mandatory. You can also use `venv` as virtual env or even none (used in container)
-
+This setup is optional. You can use Python's built-in `venv` instead. The
+container image runs Python directly without a virtual environment.
 
 ```sh
-# Create and validate environment
+# Create/activate the environment and install dependencies
 source ./scripts/configure-pyenv.sh
 python src/wtb.py
 ```
@@ -71,37 +129,52 @@ Enter it in WhatsApp under **Settings → Linked Devices → Link a Device → L
 with phone number instead**. The Neonize session is saved under `data/` and
 reused on later starts.
 
-
-
 Open a private chat with the Telegram bot and send any message. The bot asks you
-to share your phone number with Telegram's contact button. Registration
+to share your phone number using the contact-sharing button. Registration
 succeeds only if the shared contact belongs to the sending Telegram user and
 its phone number matches `PHONE_NUMBER`. The associated Telegram chat ID is
 saved in the application database.
 
-Incoming WhatsApp text is sent with the sender name (or phone number) and the
-original WhatsApp message ID. Long text is split into Telegram messages. The
-application ignores messages sent by its own WhatsApp account, group and
-broadcast messages, and messages without text.
+Incoming WhatsApp text, images, videos, and GIF-style animations are forwarded
+with sender information and the original WhatsApp message ID. Long text is split
+into Telegram messages; image text that exceeds Telegram's caption limit follows
+the image in separate messages. Replies in Telegram to forwarded WhatsApp
+messages are supported for text, photos, videos, and animations. Standalone
+Telegram messages are rejected; replies with unsupported types are ignored. The
+bridge ignores messages sent by its own WhatsApp account, messages from groups
+and broadcasts, and unsupported WhatsApp message types.
 
-## Persistence and logs
+### Persistence and logs
 
 All persistent state is kept in `data/`:
 
 - `whatsapp.db` is Neonize's WhatsApp session store.
 - `bridge.sqlite3` stores the Telegram association, Telegram polling offset,
-  and WhatsApp message delivery records.
+  message mappings, and delivery records. It stores message and sender IDs, not
+  message content. SQLite may also create `bridge.sqlite3-wal` and
+  `bridge.sqlite3-shm` sidecar files while the application is running.
 
-The SQLite database prevents already recorded WhatsApp messages from being
+The bridge database prevents already recorded WhatsApp messages from being
 forwarded again. If the process restarts while a message is marked
 `PROCESSING`, the record is changed to `FAILED` and logged; automatic retries
 are not attempted. Delivery across WhatsApp, Telegram, and SQLite cannot be
 made exactly once.
 
-Logs are written to `stderr`. They do not include the Telegram token. Exit
-status 2 indicates a WhatsApp pairing or Telegram connection/polling failure.
+Logs are written to `stderr`. Application logs do not include bot tokens or
+message contents, but can include message IDs, WhatsApp JIDs (which may contain
+phone numbers), sender names, and group names. Protect logs as potentially
+sensitive data.
 
-## Unit tests
+### Exit codes
+
+0. Normal shutdown after Ctrl+C or SIGTERM.
+1. Missing or invalid configuration.
+2. WhatsApp client initialization timeout.
+3. WhatsApp connection error during startup.
+4. WhatsApp pairing timeout.
+5. Other startup, Telegram API, or runtime error; check the logs.
+
+### Unit tests
 
 Run the unit tests from the project root with the configured Python environment:
 
@@ -110,6 +183,6 @@ python -m pytest tests/unit
 ```
 
 The tests mock WhatsApp and Telegram APIs and do not require live accounts or
-network connections. They cover configuration validation, Telegram
-registration and polling state, SQLite recovery and deduplication, and
-WhatsApp text filtering and forwarding.
+network connections. They cover configuration validation, Telegram registration,
+polling and replies, SQLite recovery and deduplication, and WhatsApp text and
+media forwarding.

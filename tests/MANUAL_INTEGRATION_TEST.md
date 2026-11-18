@@ -6,9 +6,10 @@ message IDs for each run. Do not include bot tokens or authentication data in
 test evidence.
 
 **Current implementation:** Telegram registration, standalone-message
-rejection, and incoming WhatsApp text, image, and video forwarding are
-available. Telegram-to-WhatsApp reply forwarding and other attachment types
-are not implemented yet; those cases are listed for later phases.
+rejection, and incoming WhatsApp text, image, video, and GIF-style animation
+forwarding are available. Telegram replies to forwarded WhatsApp messages are
+supported for text, photos, videos, and animations. Other attachment types and
+reply types remain pending.
 
 ## Setup, registration, and persistence
 
@@ -35,14 +36,14 @@ are not implemented yet; those cases are listed for later phases.
 - [ ] **I-18 — Duplicate WhatsApp message**: Cause the same WhatsApp message event to be delivered again, for example by replaying the same event in a controlled test environment. Confirm it is not forwarded twice.
 - [x] **I-19 — Own WhatsApp messages are ignored**: Send a message manually from the linked WhatsApp account. Confirm it is not forwarded back to Telegram.
 - [ ] **I-20 — Group and broadcast messages are ignored**: Send text in a WhatsApp group and, if available, a broadcast/status context. Confirm no Telegram message is produced.
-- [ ] **I-21 — Message without text is ignored**: Send a media-only message while testing the text-only build. Confirm no blank Telegram message is produced and the log records that non-text content was ignored.
+- [ ] **I-21 — Unsupported media-only message is ignored**: Send an unsupported media-only message, such as a document or sticker. Confirm no blank Telegram message is produced and the log records that the message type is unsupported.
 - [ ] **I-22 — WhatsApp status is ignored**: Post or receive a WhatsApp status update. Confirm it is not forwarded.
 - [ ] **I-23 — WhatsApp edited message**: Edit a previously forwarded WhatsApp message. Confirm no Telegram update is sent in this phase.
 - [ ] **I-24 — Restart after successful delivery**: Send a text, confirm delivery, then restart the service and replay/synchronize the event if possible. Confirm the message is not forwarded again.
 - [ ] **I-25 — Restart during processing**: Stop the process while a message is marked `PROCESSING`, then restart. Confirm the record is logged and changed to `FAILED`, and the message is not automatically retried.
 - [ ] **I-26 — Telegram delivery failure**: Make Telegram delivery fail in a controlled way. Confirm the error traceback is logged, the message record becomes `FAILED`, and no token appears in logs.
 
-## WhatsApp attachments to Telegram — later phase
+## WhatsApp attachments to Telegram
 
 - [x] **I-27 — Simple image**: Send one image. Confirm it arrives as a Telegram photo with the sender header.
 - [x] **I-28 — Image with caption**: Send an image with a short caption. Confirm sender information and caption are preserved.
@@ -60,9 +61,9 @@ are not implemented yet; those cases are listed for later phases.
 - [ ] **I-40 — Attachment plus long text**: Send a supported attachment with text exceeding the caption limit. Confirm the attachment arrives first, followed by the full text in Telegram-sized chunks.
 - [ ] **I-41 — WhatsApp reply context**: Reply to a WhatsApp message with text or an attachment. Confirm the Telegram message references the original WhatsApp message where supported.
 
-## Telegram replies to WhatsApp — later phase
+## Telegram replies to WhatsApp
 
-- [ ] **I-42 — Text reply**: Reply in Telegram to a forwarded WhatsApp text. Confirm the reply is sent to the correct WhatsApp chat and quotes the original WhatsApp message.
+- [x] **I-42 — Text reply**: Reply in Telegram to a forwarded WhatsApp text. Confirm the reply is sent to the correct WhatsApp chat and quotes the original WhatsApp message. **Passed; confirmed receipt by the WhatsApp recipient.**
 - [ ] **I-43 — Reply to non-existent mapping**: Reply to a Telegram message with no stored WhatsApp mapping. Confirm it is ignored and a warning is logged.
 - [ ] **I-45 — Photo reply**: Reply with a Telegram photo. Confirm the largest photo is sent to WhatsApp.
 - [ ] **I-46 — Video reply**: Reply with a Telegram video. Confirm it is sent to WhatsApp as video.
@@ -78,8 +79,8 @@ are not implemented yet; those cases are listed for later phases.
 
 ## Runtime and shutdown
 
-- [ ] **I-56 — Telegram API unavailable at startup**: Start with Telegram unreachable. Confirm an error traceback is logged and the process exits with status 2.
-- [ ] **I-57 — WhatsApp connection unavailable**: Start with WhatsApp unreachable. Confirm an error traceback is logged and the process exits with status 2.
+- [ ] **I-56 — Telegram API unavailable at startup**: Start with Telegram unreachable after WhatsApp connects. Confirm an error traceback is logged and the process exits with status 5.
+- [ ] **I-57 — WhatsApp connection unavailable**: Start with WhatsApp unreachable. Confirm an error is logged and the process exits with status 2 on initialization timeout or 3 on a connection error.
 - [x] **I-58 — Ctrl+C shutdown**: Stop a local run with Ctrl+C. Confirm it logs a normal shutdown, stops Neonize, closes SQLite, and exits without a traceback.
 - [ ] **I-59 — Container SIGTERM shutdown**: Stop the Quadlet service/container normally. Confirm SIGTERM triggers the same cleanup path, the process exits before `StopTimeout=60`, and no SQLite or Neonize corruption appears after restart.
 - [ ] **I-60 — Sensitive values are absent from logs**: Review startup, pairing, message, error, and shutdown logs. Confirm no Telegram token or WhatsApp authentication data is present; the pairing code appears only while registration is pending.

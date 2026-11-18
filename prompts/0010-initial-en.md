@@ -156,7 +156,7 @@ The content conversions and APIs to be used are detailed in the following table:
 | **Location / Contacts** | Google Maps link / `[Contact: name]` | Google Maps link / `[Contact]` label |
 | **Replies** | `contextInfo.stanzaID` → `reply_parameters` in Telegram | `build_quoted_wa_event` (`SimpleNamespace` compatible with proto2) |
 
-- When a WhatsApp message contains an attachment and text that exceeds the caption limit, the entire text must be sent in a separate message, followed by the attachment.
+- When a WhatsApp message contains an attachment and text that exceeds the caption limit, the entire text must be sent in a separate message, afterwards followed by the attachment.
 
 ### Tests
 
