@@ -36,6 +36,12 @@ set -a
 source "${ENV_FILE}"
 set +a
 
+if [[ -f "${ENV_FILE}.prod" ]]; then
+    set -a
+    source "${ENV_FILE}.prod"
+    set +a
+fi
+
 
 # --------------------------------------------------
 # Validate deployment configuration
