@@ -172,6 +172,31 @@ def test_telegram_send_photo_uploads_multipart_image(
     assert captured["timeout"] == 40
 
 
+def test_telegram_send_document_preserves_filename_and_mime_type(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(wtb, "CONFIG", {"TELEGRAM_BOT_TOKEN": "test-token"})
+    captured: dict[str, Any] = {}
+
+    def fake_urlopen(request: Any, timeout: int) -> FakeResponse:
+        captured["url"] = request.full_url
+        captured["body"] = request.data
+        return FakeResponse({"ok": True, "result": {"message_id": 13}})
+
+    monkeypatch.setattr(wtb, "urlopen", fake_urlopen)
+    pdf_data = b"%PDF-1.7 test-pdf"
+
+    result = wtb.telegram_send_document(
+        123, "caption", pdf_data, "application/pdf", "invoice-2026.pdf"
+    )
+
+    assert result["result"]["message_id"] == 13
+    assert captured["url"].endswith("/bottest-token/sendDocument")
+    assert b'name="document"; filename="invoice-2026.pdf"' in captured["body"]
+    assert b"Content-Type: application/pdf" in captured["body"]
+    assert pdf_data in captured["body"]
+
+
 @pytest.mark.parametrize(
     ("send_function", "method", "media_field", "filename"),
     [
@@ -642,3 +667,31 @@ def test_telegram_polling_persists_next_update_offset(
     assert offset == "41"
     assert requests[0]["timeout"] == 30
     assert requests[1]["offset"] == 41
+
+
+def test_telegram_polling_retries_transient_transport_errors(
+    app_database: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    requests: list[int] = []
+    delays: list[int] = []
+
+    class PollFinished(Exception):
+        pass
+
+    def fake_request(
+        method: str, payload: dict[str, Any], *, timeout: int = 40
+    ) -> dict[str, Any]:
+        assert method == "getUpdates"
+        requests.append(timeout)
+        if len(requests) == 1:
+            raise wtb.TelegramTransportError("getUpdates timed out", retryable=True)
+        raise PollFinished
+
+    monkeypatch.setattr(wtb, "telegram_request", fake_request)
+    monkeypatch.setattr(wtb.time, "sleep", delays.append)
+
+    with pytest.raises(PollFinished):
+        wtb.telegram_polling_loop(None)
+
+    assert requests == [45, 45]
+    assert delays == [1]

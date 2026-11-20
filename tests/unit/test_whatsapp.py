@@ -106,6 +106,33 @@ def test_falls_back_to_sender_jid_when_pushname_is_empty(
     assert "<b>Sender:</b> 34987654321" in telegram_calls[0][1]["text"]
 
 
+def test_uses_business_name_from_neonize_contact_store_when_pushname_is_missing(
+    app_database: Any,
+    registered_chat: int,
+    telegram_calls: list[Any],
+    whatsapp_event_factory: Any,
+) -> None:
+    event = whatsapp_event_factory(
+        pushname="",
+        sender_user="987654321012345",
+        sender_server="lid",
+        sender_alt_user="34123456789",
+        sender_alt_server="s.whatsapp.net",
+    )
+    lookups: list[str] = []
+
+    def get_contact(jid: Any) -> Any:
+        lookups.append(wtb.whatsapp_format_jid(jid))
+        return type("Contact", (), {"BusinessName": "Example Business"})()
+
+    client = type("Client", (), {"contact": type("Store", (), {"get_contact": staticmethod(get_contact)})()})()
+
+    wtb.on_whatsapp_message(client, event)
+
+    assert "<b>Sender:</b> Example Business" in telegram_calls[0][1]["text"]
+    assert lookups == ["987654321012345@lid"]
+
+
 def test_ignored_group_message_logs_group_name_and_sender(
     app_database: Any,
     whatsapp_event_factory: Any,
@@ -162,13 +189,13 @@ def test_unsupported_whatsapp_content_logs_populated_field_names(
 ) -> None:
     event = whatsapp_event_factory(text="")
     event.Message = WhatsAppMessage()
-    event.Message.documentMessage.mimetype = "application/pdf"
+    event.Message.stickerMessage.mimetype = "image/webp"
 
     with caplog.at_level(logging.DEBUG, logger="wtb"):
         wtb.on_whatsapp_message(None, event)
 
     assert "without supported content" in caplog.text
-    assert "populated_fields=['documentMessage']" in caplog.text
+    assert "populated_fields=['stickerMessage']" in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -386,6 +413,38 @@ def test_forwards_non_ptt_audio_as_telegram_audio(
     assert "<b>Sender:</b> Alice" in audio[1]
     assert "WhatsApp message ID: wa-message-1" in audio[1]
     assert audio[2:] == (audio_data, "audio/mpeg")
+    assert message_rows(app_database)[0]["status"] == "SENT"
+
+
+def test_forwards_pdf_document_with_filename_and_mime_type(
+    app_database: Any,
+    registered_chat: int,
+    telegram_operations: list[tuple[str, Any]],
+    whatsapp_event_factory: Any,
+) -> None:
+    pdf_data = b"%PDF-1.7 fake-pdf-data"
+    event = whatsapp_event_factory(
+        text="",
+        document_caption="",
+        document_mime_type="application/pdf",
+        document_file_name="invoice-2026.pdf",
+        pushname="Alice",
+    )
+    client = type("Client", (), {"download_any": lambda _self, _message: pdf_data})()
+
+    wtb.on_whatsapp_message(client, event)
+
+    assert len(telegram_operations) == 1
+    method, document = telegram_operations[0]
+    assert method == "sendDocument"
+    assert document[0] == registered_chat
+    assert "<b>Sender:</b> Alice" in document[1]
+    assert "WhatsApp message ID: wa-message-1" in document[1]
+    assert document[2:] == (
+        pdf_data,
+        "application/pdf",
+        "invoice-2026.pdf",
+    )
     assert message_rows(app_database)[0]["status"] == "SENT"
 
 

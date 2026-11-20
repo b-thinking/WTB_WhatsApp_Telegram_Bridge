@@ -106,12 +106,25 @@ def telegram_operations(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, Any]
         operations.append(("sendAudio", (chat_id, caption, media_data, mime_type)))
         return {"ok": True, "result": {"message_id": 700 + len(operations)}}
 
+    def fake_send_document(
+        chat_id: int,
+        caption: str,
+        media_data: bytes,
+        mime_type: str,
+        filename: str,
+    ) -> dict[str, Any]:
+        operations.append(
+            ("sendDocument", (chat_id, caption, media_data, mime_type, filename))
+        )
+        return {"ok": True, "result": {"message_id": 700 + len(operations)}}
+
     monkeypatch.setattr(wtb, "telegram_request", fake_request)
     monkeypatch.setattr(wtb, "telegram_send_photo", fake_send_photo)
     monkeypatch.setattr(wtb, "telegram_send_video", fake_send_video)
     monkeypatch.setattr(wtb, "telegram_send_animation", fake_send_animation)
     monkeypatch.setattr(wtb, "telegram_send_voice", fake_send_voice)
     monkeypatch.setattr(wtb, "telegram_send_audio", fake_send_audio)
+    monkeypatch.setattr(wtb, "telegram_send_document", fake_send_document)
     return operations
 
 
@@ -140,6 +153,9 @@ def whatsapp_event_factory():
         audio_caption: str | None = None,
         audio_mime_type: str = "audio/ogg; codecs=opus",
         audio_ptt: bool = False,
+        document_caption: str | None = None,
+        document_mime_type: str = "application/pdf",
+        document_file_name: str = "document.pdf",
     ) -> Any:
         sender = SimpleNamespace(User=sender_user, Server=sender_server)
         sender_alt = SimpleNamespace(
@@ -179,12 +195,22 @@ def whatsapp_event_factory():
             if audio_caption is not None
             else None
         )
+        document_message = (
+            SimpleNamespace(
+                caption=document_caption,
+                mimetype=document_mime_type,
+                fileName=document_file_name,
+            )
+            if document_caption is not None
+            else None
+        )
         message = SimpleNamespace(
             conversation=text,
             extendedTextMessage=SimpleNamespace(text=""),
             imageMessage=image_message,
             videoMessage=video_message,
             audioMessage=audio_message,
+            documentMessage=document_message,
         )
         return SimpleNamespace(Info=info, Message=message)
 
