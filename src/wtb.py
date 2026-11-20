@@ -13,7 +13,6 @@ import signal
 import sqlite3
 import sys
 import threading
-import time
 import uuid
 from collections.abc import Callable, Iterable
 from pathlib import Path
@@ -24,7 +23,6 @@ from urllib.request import Request, urlopen
 from dotenv import load_dotenv
 from neonize.client import NewClient
 from neonize.events import ConnectedEv, MessageEv, PairStatusEv
-from neonize.exc import ContactStoreError
 from neonize.utils.enum import ClientName
 from neonize.utils.jid import JID
 
@@ -36,13 +34,11 @@ LOGGER = logging.getLogger("wtb")
 DATABASE_LOCK: threading.Lock = threading.Lock()
 DATABASE: sqlite3.Connection | None = None
 CONFIG: dict[str, str] = {}
-TELEGRAM_LONG_POLL_MARGIN = 15
 TELEGRAM_TEXT_LIMIT = 4096
 TELEGRAM_CAPTION_LIMIT = 1024
 TELEGRAM_PHOTO_SIZE_LIMIT = 10_000_000
 TELEGRAM_VIDEO_SIZE_LIMIT = 50_000_000
 TELEGRAM_AUDIO_SIZE_LIMIT = 50_000_000
-TELEGRAM_DOCUMENT_SIZE_LIMIT = 50_000_000
 WHATSAPP_GROUP_NAME_CACHE: dict[str, str | None] = {}
 WHATSAPP_GROUP_NAME_CACHE_LOCK = threading.Lock()
 
@@ -187,14 +183,6 @@ def database_initialize() -> sqlite3.Connection:
     return database
 
 
-class TelegramTransportError(RuntimeError):
-    """Transport-level Telegram error, with retry guidance for polling."""
-
-    def __init__(self, message: str, *, retryable: bool) -> None:
-        super().__init__(message)
-        self.retryable = retryable
-
-
 def telegram_request(
     method: str, payload: dict[str, Any], *, timeout: int = 40
 ) -> dict[str, Any]:
@@ -217,7 +205,7 @@ def telegram_request(
     return result
 
 
-def _telegram_transport_error(method: str, error: Exception) -> TelegramTransportError:
+def _telegram_transport_error(method: str, error: Exception) -> RuntimeError:
     """Describe a Telegram request failure without exposing the bot token."""
     if isinstance(error, HTTPError):
         detail = f"HTTP {error.code}"
@@ -234,12 +222,7 @@ def _telegram_transport_error(method: str, error: Exception) -> TelegramTranspor
     if token:
         detail = detail.replace(token, "[redacted]")
     detail = " ".join(detail.split())[:160] or type(error).__name__
-    retryable = isinstance(error, (URLError, TimeoutError)) or (
-        isinstance(error, HTTPError) and (error.code == 429 or error.code >= 500)
-    )
-    return TelegramTransportError(
-        f"Telegram API request failed ({method}): {detail}", retryable=retryable
-    )
+    return RuntimeError(f"Telegram API request failed ({method}): {detail}")
 
 
 def telegram_send_media(
@@ -250,17 +233,11 @@ def telegram_send_media(
     media_data: bytes,
     mime_type: str,
     filename_stem: str,
-    filename: str | None = None,
 ) -> dict[str, Any]:
     """Upload a media file to Telegram using multipart form data."""
     boundary = f"wtb-{uuid.uuid4().hex}"
     extension = mimetypes.guess_extension(mime_type, strict=False) or ".bin"
-    if filename is None:
-        filename = f"{filename_stem}{extension}"
-    else:
-        filename = os.path.basename(filename.replace("\\", "/"))
-        filename = filename.replace('"', "'").replace("\r", "").replace("\n", "")
-        filename = filename or f"{filename_stem}{extension}"
+    filename = f"{filename_stem}{extension}"
     fields = {
         "chat_id": str(chat_id),
         "caption": caption,
@@ -354,26 +331,6 @@ def telegram_send_audio(
     """Upload regular WhatsApp audio to Telegram as an audio file."""
     return telegram_send_media(
         "sendAudio", "audio", chat_id, caption, media_data, mime_type, "whatsapp-audio"
-    )
-
-
-def telegram_send_document(
-    chat_id: int,
-    caption: str,
-    media_data: bytes,
-    mime_type: str,
-    filename: str,
-) -> dict[str, Any]:
-    """Upload a WhatsApp document to Telegram with its original filename."""
-    return telegram_send_media(
-        "sendDocument",
-        "document",
-        chat_id,
-        caption,
-        media_data,
-        mime_type,
-        "whatsapp-document",
-        filename,
     )
 
 
@@ -720,29 +677,11 @@ def telegram_polling_loop(client: NewClient | None = None) -> None:
     ).fetchone()
     offset = int(row["value"]) if row else None
     LOGGER.info(f"Started Telegram polling loop. Message offset: {offset if offset is not None else 'None'}")
-    retry_delay = 1
     while True:
         payload: dict[str, Any] = {"timeout": 30, "allowed_updates": ["message"]}
         if offset is not None:
             payload["offset"] = offset
-        try:
-            updates = telegram_request(
-                "getUpdates",
-                payload,
-                timeout=payload["timeout"] + TELEGRAM_LONG_POLL_MARGIN,
-            )["result"]
-        except TelegramTransportError as error:
-            if not error.retryable:
-                raise
-            LOGGER.warning(
-                "%s; retrying Telegram polling in %s second(s)",
-                error,
-                retry_delay,
-            )
-            time.sleep(retry_delay)
-            retry_delay = min(retry_delay * 2, 30)
-            continue
-        retry_delay = 1
+        updates = telegram_request("getUpdates", payload, timeout=40)["result"]
         for update in updates:
             telegram_process_update(update, client)
             offset = update["update_id"] + 1
@@ -823,39 +762,6 @@ def whatsapp_parse_jid(jid_string: str) -> JID:
         Integrator=0,
         Server=server,
     )
-
-
-def whatsapp_contact_display_name(client: Any, *jids: Any) -> tuple[str, str] | None:
-    """Look up a known display name in Neonize's local contact store."""
-    contact_store = getattr(client, "contact", None)
-    get_contact = getattr(contact_store, "get_contact", None)
-    if not callable(get_contact):
-        return None
-
-    seen: set[str] = set()
-    for jid in jids:
-        jid_string = whatsapp_format_jid(jid)
-        if not jid_string or jid_string in seen:
-            continue
-        seen.add(jid_string)
-        try:
-            contact = get_contact(jid)
-        except ContactStoreError as error:
-            LOGGER.debug(
-                "WhatsApp contact lookup failed for sender JID (%s)",
-                type(error).__name__,
-            )
-            continue
-        for field, source in (
-            ("BusinessName", "business_name"),
-            ("FullName", "contact_full_name"),
-            ("FirstName", "contact_first_name"),
-            ("PushName", "contact_pushname"),
-        ):
-            name = getattr(contact, field, "").strip()
-            if name:
-                return name, source
-    return None
 
 
 def whatsapp_build_quote_event(
@@ -948,11 +854,7 @@ def on_whatsapp_message(client: NewClient, event: MessageEv) -> None:
         image_message = whatsapp_get_message_field(event.Message, "imageMessage")
         video_message = whatsapp_get_message_field(event.Message, "videoMessage")
         audio_message = whatsapp_get_message_field(event.Message, "audioMessage")
-        document_message = whatsapp_get_message_field(
-            event.Message, "documentMessage"
-        )
-        media_message = image_message or video_message or audio_message or document_message
-        document_filename = ""
+        media_message = image_message or video_message or audio_message
         if image_message is not None:
             media_kind = "image"
             telegram_media_sender = telegram_send_photo
@@ -974,12 +876,6 @@ def on_whatsapp_message(client: NewClient, event: MessageEv) -> None:
             )
             media_size_limit = TELEGRAM_AUDIO_SIZE_LIMIT
             default_mime_type = "audio/ogg" if is_voice_note else "audio/mpeg"
-        elif document_message is not None:
-            media_kind = "document"
-            telegram_media_sender = telegram_send_document
-            media_size_limit = TELEGRAM_DOCUMENT_SIZE_LIMIT
-            default_mime_type = "application/octet-stream"
-            document_filename = getattr(document_message, "fileName", "").strip()
         else:
             media_kind = ""
             telegram_media_sender = None
@@ -1046,27 +942,21 @@ def on_whatsapp_message(client: NewClient, event: MessageEv) -> None:
         if push_name:
             sender_name = push_name
             sender_name_source = "pushname"
+        elif sender_server == "lid" and sender_alt_user:
+            sender_name = sender_alt_user
+            sender_name_source = "sender_alt"
+        elif sender_user:
+            sender_name = sender_user
+            sender_name_source = "sender_jid"
         else:
-            contact_name = whatsapp_contact_display_name(
-                client, sender_jid, sender_alt_jid
+            sender_name = getattr(chat_jid, "User", "unknown sender")
+            sender_name_source = "chat_jid_fallback"
+            LOGGER.debug(
+                "No WhatsApp pushname or sender JID was available for message %s; "
+                "using chat JID fallback (server=%r)",
+                wa_message_id,
+                getattr(chat_jid, "Server", ""),
             )
-            if contact_name:
-                sender_name, sender_name_source = contact_name
-            elif sender_server == "lid" and sender_alt_user:
-                sender_name = sender_alt_user
-                sender_name_source = "sender_alt"
-            elif sender_user:
-                sender_name = sender_user
-                sender_name_source = "sender_jid"
-            else:
-                sender_name = getattr(chat_jid, "User", "unknown sender")
-                sender_name_source = "chat_jid_fallback"
-                LOGGER.debug(
-                    "No WhatsApp pushname or sender JID was available for message %s; "
-                    "using chat JID fallback (server=%r)",
-                    wa_message_id,
-                    getattr(chat_jid, "Server", ""),
-                )
 
         LOGGER.debug(
             "Selected WhatsApp sender from %s for message %s",
@@ -1111,25 +1001,16 @@ def on_whatsapp_message(client: NewClient, event: MessageEv) -> None:
                 caption = header + html.escape(text) + original_id
                 overflow_chunks: list[str] | None = None
                 if len(caption) <= TELEGRAM_CAPTION_LIMIT:
-                    media_caption = caption
+                    photo_caption = caption
                 else:
                     max_body_length = TELEGRAM_TEXT_LIMIT - len(header) - len(original_id)
                     overflow_chunks = split_html_text(text, max_body_length)
-                    media_caption = header.rstrip()
+                    photo_caption = header.rstrip()
 
                 assert telegram_media_sender is not None
-                if document_message is not None:
-                    result = telegram_media_sender(
-                        telegram_chat_id,
-                        media_caption,
-                        media_data,
-                        mime_type,
-                        document_filename or "whatsapp-document",
-                    )["result"]
-                else:
-                    result = telegram_media_sender(
-                        telegram_chat_id, media_caption, media_data, mime_type
-                    )["result"]
+                result = telegram_media_sender(
+                    telegram_chat_id, photo_caption, media_data, mime_type
+                )["result"]
                 first_message_id = result["message_id"]
                 if overflow_chunks is not None:
                     for index, chunk in enumerate(overflow_chunks):

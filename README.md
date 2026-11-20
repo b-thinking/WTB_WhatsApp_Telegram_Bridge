@@ -1,11 +1,10 @@
 # WhatsApp–Telegram Bridge
 
 WhatsApp-Telegram Bridge connects a WhatsApp account to one registered Telegram
-private chat. It forwards incoming WhatsApp text, images, videos, GIF-style
-animations, voice notes, audio files, and documents to Telegram. Replies in
-Telegram can be sent to the original WhatsApp chat as text, photos, videos, or
-animations. The bridge uses Neonize for WhatsApp and Telegram's Bot API through
-Python's standard-library `urllib`.
+private chat. It forwards incoming WhatsApp text, images, videos, and GIF-style
+animations to Telegram. Replies in Telegram can be sent to the original WhatsApp
+chat as text, photos, videos, or animations. The bridge uses Neonize for WhatsApp
+and Telegram's Bot API through Python's standard-library `urllib`.
 
 ## Quick start
 
@@ -136,11 +135,10 @@ succeeds only if the shared contact belongs to the sending Telegram user and
 its phone number matches `PHONE_NUMBER`. The associated Telegram chat ID is
 saved in the application database.
 
-Incoming WhatsApp text, images, videos, GIF-style animations, voice notes, audio
-files, and documents are forwarded with sender information and the original
-WhatsApp message ID. Documents retain their filename and MIME type. Long text is
-split into Telegram messages; attachment text that exceeds Telegram's caption
-limit follows the attachment in separate messages. Replies in Telegram to forwarded WhatsApp
+Incoming WhatsApp text, images, videos, and GIF-style animations are forwarded
+with sender information and the original WhatsApp message ID. Long text is split
+into Telegram messages; image text that exceeds Telegram's caption limit follows
+the image in separate messages. Replies in Telegram to forwarded WhatsApp
 messages are supported for text, photos, videos, and animations. Standalone
 Telegram messages are rejected; replies with unsupported types are ignored. The
 bridge ignores messages sent by its own WhatsApp account, messages from groups

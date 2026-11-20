@@ -6,10 +6,10 @@ message IDs for each run. Do not include bot tokens or authentication data in
 test evidence.
 
 **Current implementation:** Telegram registration, standalone-message
-rejection, and incoming WhatsApp text, image, video, GIF-style animation, voice,
-audio, and document forwarding are available. Telegram replies to forwarded
-WhatsApp messages are supported for text, photos, videos, and animations. Other
-attachment reply types remain pending.
+rejection, and incoming WhatsApp text, image, video, and GIF-style animation
+forwarding are available. Telegram replies to forwarded WhatsApp messages are
+supported for text, photos, videos, and animations. Other attachment types and
+reply types remain pending.
 
 ## Setup, registration, and persistence
 
@@ -30,13 +30,13 @@ attachment reply types remain pending.
 - [x] **I-12 — Text longer than 4096 characters**: Send a message longer than 4096 characters. Confirm it is split into multiple Telegram messages, all parts arrive in order, and the original WhatsApp message ID is included.
 - [x] **I-13 — Unicode long text**: Send a long message containing accented characters, emoji, and multi-code-point emoji. Confirm the message is split without losing or corrupting characters.
 - [x] **I-14 — Sender Pushname available**: Send a message from a WhatsApp profile with a visible Pushname. Confirm that name appears after `Sender:`.
-- [ ] **I-15 — Sender Pushname unavailable**: Send from an account that supplies no Pushname. Confirm the sender falls back to a business name, or finally to phone-number JID when available.
+- [ ] **I-15 — Sender Pushname unavailable**: Send from an account that supplies no Pushname. Confirm the sender falls back to a phone-number JID when available.
 - [ ] **I-16 — LID sender with alternate phone JID**: Send from an account whose primary sender JID uses LID addressing. Confirm `SenderAlt` supplies the phone number instead of the long LID.
 - [ ] **I-17 — Sender metadata diagnostics**: With `LOG_LEVEL=DEBUG`, send one message with Pushname and one without. Confirm logs identify Pushname availability, sender JID server, alternate JID availability, and the selected sender source without logging the phone number or Pushname.
 - [ ] **I-18 — Duplicate WhatsApp message**: Cause the same WhatsApp message event to be delivered again, for example by replaying the same event in a controlled test environment. Confirm it is not forwarded twice.
 - [x] **I-19 — Own WhatsApp messages are ignored**: Send a message manually from the linked WhatsApp account. Confirm it is not forwarded back to Telegram.
 - [ ] **I-20 — Group and broadcast messages are ignored**: Send text in a WhatsApp group and, if available, a broadcast/status context. Confirm no Telegram message is produced.
-- [ ] **I-21 — Unsupported media-only message is ignored**: Send an unsupported media-only message, such as a sticker. Confirm no blank Telegram message is produced and the log records that the message type is unsupported.
+- [ ] **I-21 — Unsupported media-only message is ignored**: Send an unsupported media-only message, such as a document or sticker. Confirm no blank Telegram message is produced and the log records that the message type is unsupported.
 - [ ] **I-22 — WhatsApp status is ignored**: Post or receive a WhatsApp status update. Confirm it is not forwarded.
 - [ ] **I-23 — WhatsApp edited message**: Edit a previously forwarded WhatsApp message. Confirm no Telegram update is sent in this phase.
 - [ ] **I-24 — Restart after successful delivery**: Send a text, confirm delivery, then restart the service and replay/synchronize the event if possible. Confirm the message is not forwarded again.
@@ -51,7 +51,7 @@ attachment reply types remain pending.
 - [x] **I-30 — Simple video**: Send one video. Confirm it arrives as a Telegram video with the sender header.
 - [x] **I-31 — GIF/animation**: Send a WhatsApp video with GIF playback enabled. Confirm Telegram receives it as an animation.
 - [ ] **I-32 — Document**: Send a document. Confirm it arrives with its filename and MIME type preserved.
-- [x] **I-33 — Voice note**: Send a PTT voice note. Confirm Telegram receives it as a voice message.
+- [ ] **I-33 — Voice note**: Send a PTT voice note. Confirm Telegram receives it as a voice message.
 - [ ] **I-34 — Audio file**: Send a non-PTT audio file. Confirm Telegram receives it as audio rather than a voice note.
 - [ ] **I-35 — Static sticker**: Send a static WhatsApp sticker. Confirm the sticker and sender information arrive in Telegram.
 - [ ] **I-36 — Location**: Send a WhatsApp location. Confirm Telegram receives the expected Google Maps link.
