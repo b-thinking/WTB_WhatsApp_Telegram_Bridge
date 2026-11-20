@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from typing import Any, Self
 from urllib.error import URLError
 
 import pytest
+from neonize.events import MessageEv
 
 from src import wtb
 
@@ -72,6 +74,74 @@ def test_telegram_request_raises_api_description(monkeypatch: pytest.MonkeyPatch
 
     with pytest.raises(RuntimeError, match="chat not found"):
         wtb.telegram_request("sendMessage", {})
+
+
+def test_telegram_download_file_uses_get_file_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(wtb, "CONFIG", {"TELEGRAM_BOT_TOKEN": "test-token"})
+    api_calls: list[tuple[str, dict[str, Any]]] = []
+    downloads: list[tuple[str, str]] = []
+
+    def fake_api_request(method: str, payload: dict[str, Any]) -> dict[str, Any]:
+        api_calls.append((method, payload))
+        return {"result": {"file_path": "photos/file.jpg"}}
+
+    def fake_urlopen(request: Any, timeout: int) -> FakeResponse:
+        downloads.append((request.full_url, request.get_method()))
+        return FakeResponse({"bytes": "unused"})
+
+    monkeypatch.setattr(wtb, "telegram_request", fake_api_request)
+    monkeypatch.setattr(wtb, "urlopen", fake_urlopen)
+
+    assert wtb.telegram_download_file("telegram-file-id") == b'{"bytes": "unused"}'
+    assert api_calls == [("getFile", {"file_id": "telegram-file-id"})]
+    assert downloads == [
+        ("https://api.telegram.org/file/bottest-token/photos/file.jpg", "GET")
+    ]
+
+
+def test_database_migration_removes_persisted_whatsapp_content(
+    tmp_path: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    database_path = data_dir / "bridge.sqlite3"
+    marker = b"private WhatsApp message content"
+    legacy = sqlite3.connect(database_path)
+    legacy.execute(
+        "CREATE TABLE messages ("
+        "record_id INTEGER PRIMARY KEY, wa_message_id TEXT NOT NULL, "
+        "wa_chat_jid TEXT NOT NULL, telegram_message_id INTEGER, "
+        "telegram_chat_id INTEGER, direction TEXT NOT NULL, status TEXT NOT NULL, "
+        "created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+        "modified_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, whatsapp_event BLOB)"
+    )
+    legacy.execute(
+        "INSERT INTO messages (wa_message_id, wa_chat_jid, telegram_message_id, "
+        "telegram_chat_id, direction, status, whatsapp_event) "
+        "VALUES ('wa-1', '123@s.whatsapp.net', 10, 20, 'WHATSAPP_TO_TELEGRAM', "
+        "'SENT', ?)",
+        (marker,),
+    )
+    legacy.commit()
+    legacy.close()
+    monkeypatch.setattr(wtb, "DATA_DIR", data_dir)
+    monkeypatch.setattr(wtb, "DATABASE_PATH", database_path)
+
+    database = wtb.database_initialize()
+    try:
+        columns = {row["name"] for row in database.execute("PRAGMA table_info(messages)")}
+        row = database.execute(
+            "SELECT wa_message_id, wa_chat_jid FROM messages"
+        ).fetchone()
+        assert "whatsapp_event" not in columns
+        assert "wa_sender_jid" in columns
+        assert row["wa_message_id"] == "wa-1"
+        assert row["wa_chat_jid"] == "123@s.whatsapp.net"
+        assert marker not in database_path.read_bytes()
+    finally:
+        database.close()
 
 
 def test_telegram_send_photo_uploads_multipart_image(
@@ -335,39 +405,181 @@ def test_reply_to_rejected_message_or_bot_answer_is_not_reprocessed(
     assert "Ignoring Telegram reply 303 to rejected standalone message" in caplog.text
 
 
-def test_reply_to_forwarded_whatsapp_message_is_not_rejected_as_standalone(
+def test_reply_to_forwarded_whatsapp_text_quotes_original_message(
     app_database: Any,
     registered_chat: int,
     telegram_calls: list[Any],
     caplog: pytest.LogCaptureFixture,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    with app_database:
-        app_database.execute(
-            "INSERT INTO messages "
-            "(wa_message_id, wa_chat_jid, telegram_message_id, telegram_chat_id, "
-            "direction, status) VALUES ('wa-1', 'chat@s.whatsapp.net', 801, ?, "
-            "'WHATSAPP_TO_TELEGRAM', 'SENT')",
-            (registered_chat,),
-        )
+    sent: list[tuple[Any, ...]] = []
 
-    with caplog.at_level("INFO", logger="wtb"):
+    class FakeWhatsAppClient:
+        def reply_message(self, text: str, **kwargs: Any) -> None:
+            sent.append((text, kwargs))
+
+    whatsapp_client = FakeWhatsAppClient()
+    event = _make_quote_event()
+    wtb.on_whatsapp_message(None, event)
+    forwarded_id = app_database.execute(
+        "SELECT telegram_message_id FROM messages WHERE wa_message_id = ?",
+        ("wa-original",),
+    ).fetchone()["telegram_message_id"]
+    assert forwarded_id == 701
+    assert telegram_calls[0][0] == "sendMessage"
+    telegram_calls.clear()
+
+    with caplog.at_level("DEBUG", logger="wtb"):
         wtb.telegram_process_update(
             {
                 "message": {
                     "message_id": 304,
                     "chat": {"id": registered_chat, "type": "private"},
                     "from": {"id": registered_chat},
-                    "reply_to_message": {"message_id": 801},
+                    "reply_to_message": {"message_id": forwarded_id},
                     "text": "Reply to forwarded WhatsApp message",
                 }
-            }
+            },
+            whatsapp_client,
         )
 
     assert telegram_calls == []
-    assert "reply forwarding is not implemented yet" in caplog.text
+    assert sent[0][0] == "Reply to forwarded WhatsApp message"
+    assert sent[0][1]["quoted"].Info.ID == "wa-original"
+    assert sent[0][1]["quoted"].Message.conversation == ""
+    assert "message_fields=['conversation']" in caplog.text
+    assert "recipient_jid_fields=['User', 'RawAgent', 'Device', 'Integrator', 'Server']" in caplog.text
+    assert "Original WhatsApp text" not in caplog.text
+    assert sent[0][1]["to"].User == "34111111111"
+    assert "Forwarded Telegram text reply 304" in caplog.text
     assert app_database.execute(
         "SELECT COUNT(*) AS count FROM telegram_rejected_messages"
     ).fetchone()["count"] == 0
+    assert app_database.execute(
+        "SELECT status FROM telegram_replies WHERE telegram_message_id = 304"
+    ).fetchone()["status"] == "SENT"
+    columns = {
+        row["name"] for row in app_database.execute("PRAGMA table_info(messages)")
+    }
+    assert "whatsapp_event" not in columns
+    stored_ids = app_database.execute(
+        "SELECT wa_chat_jid, wa_sender_jid FROM messages "
+        "WHERE wa_message_id = 'wa-original'"
+    ).fetchone()
+    assert stored_ids["wa_chat_jid"] == "34111111111@s.whatsapp.net"
+    assert stored_ids["wa_sender_jid"] == "34111111111@s.whatsapp.net"
+
+    wtb.telegram_process_update(
+        {
+            "message": {
+                "message_id": 304,
+                "chat": {"id": registered_chat, "type": "private"},
+                "from": {"id": registered_chat},
+                "reply_to_message": {"message_id": forwarded_id},
+                "text": "Reply to forwarded WhatsApp message",
+            }
+        },
+        whatsapp_client,
+    )
+    assert len(sent) == 1
+
+
+def _make_quote_event() -> MessageEv:
+    event = MessageEv()
+    event.Info.ID = "wa-original"
+    event.Info.MessageSource.Chat.User = "34111111111"
+    event.Info.MessageSource.Chat.Server = "s.whatsapp.net"
+    event.Info.MessageSource.Sender.User = "34111111111"
+    event.Info.MessageSource.Sender.Server = "s.whatsapp.net"
+    event.Message.conversation = "Original WhatsApp text"
+    return event
+
+
+@pytest.mark.parametrize(
+    ("media_key", "method_name", "expected_kwargs"),
+    [
+        ("photo", "send_image", {"caption": "caption"}),
+        ("video", "send_video", {"caption": "caption"}),
+        (
+            "animation",
+            "send_video",
+            {"caption": "caption", "gifplayback": True, "is_gif": True},
+        ),
+    ],
+)
+def test_reply_media_is_sent_with_quote_and_largest_photo(
+    app_database: Any,
+    registered_chat: int,
+    telegram_calls: list[Any],
+    monkeypatch: pytest.MonkeyPatch,
+    media_key: str,
+    method_name: str,
+    expected_kwargs: dict[str, Any],
+) -> None:
+    with app_database:
+        app_database.execute(
+            "INSERT INTO messages "
+            "(wa_message_id, wa_chat_jid, wa_sender_jid, telegram_message_id, "
+            "telegram_chat_id, direction, status) VALUES ('wa-original', "
+            "'34111111111@s.whatsapp.net', '34111111111@s.whatsapp.net', 801, ?, "
+            "'WHATSAPP_TO_TELEGRAM', 'SENT')",
+            (registered_chat,),
+        )
+    sent: list[tuple[str, tuple[Any, ...], dict[str, Any]]] = []
+    downloaded_file_ids: list[str] = []
+
+    class FakeWhatsAppClient:
+        def send_image(self, *args: Any, **kwargs: Any) -> None:
+            sent.append(("send_image", args, kwargs))
+
+        def send_video(self, *args: Any, **kwargs: Any) -> None:
+            sent.append(("send_video", args, kwargs))
+
+    whatsapp_client = FakeWhatsAppClient()
+
+    def fake_download(file_id: str) -> bytes:
+        downloaded_file_ids.append(file_id)
+        return b"media-data"
+
+    monkeypatch.setattr(wtb, "telegram_download_file", fake_download)
+    item: dict[str, Any]
+    if media_key == "photo":
+        item = {
+            "photo": [
+                {"file_id": "large", "width": 800, "height": 600},
+                {"file_id": "small", "width": 100, "height": 75},
+            ],
+            "caption": "caption",
+        }
+    else:
+        item = {media_key: {"file_id": f"{media_key}-file"}, "caption": "caption"}
+    item.update(
+        {
+            "message_id": 305,
+            "chat": {"id": registered_chat, "type": "private"},
+            "from": {"id": registered_chat},
+            "reply_to_message": {"message_id": 801},
+        }
+    )
+
+    wtb.telegram_process_update({"message": item}, whatsapp_client)
+
+    assert telegram_calls == []
+    assert len(sent) == 1
+    assert downloaded_file_ids == ["large" if media_key == "photo" else f"{media_key}-file"]
+    name, args, kwargs = sent[0]
+    assert name == method_name
+    assert args[0].User == "34111111111"
+    assert args[0].SerializeToString()
+    assert args[1] == b"media-data"
+    assert kwargs["quoted"].Info.ID == "wa-original"
+    assert kwargs["quoted"].Message.conversation == ""
+    assert kwargs["quoted"].Info.MessageSource.Chat.SerializeToString()
+    assert kwargs["quoted"].Info.MessageSource.Sender.SerializeToString()
+    assert {key: value for key, value in kwargs.items() if key != "quoted"} == expected_kwargs
+    assert app_database.execute(
+        "SELECT status FROM telegram_replies WHERE telegram_message_id = 305"
+    ).fetchone()["status"] == "SENT"
 
 
 def test_standalone_message_replay_is_deduplicated_after_database_reopen(
@@ -414,10 +626,14 @@ def test_telegram_polling_persists_next_update_offset(
         raise PollFinished
 
     monkeypatch.setattr(wtb, "telegram_request", fake_request)
-    monkeypatch.setattr(wtb, "telegram_process_update", processed.append)
+    monkeypatch.setattr(
+        wtb,
+        "telegram_process_update",
+        lambda update, _client: processed.append(update),
+    )
 
     with pytest.raises(PollFinished):
-        wtb.telegram_polling_loop()
+        wtb.telegram_polling_loop(None)
 
     offset = app_database.execute(
         "SELECT value FROM settings WHERE key = 'telegram_update_offset'"

@@ -31,6 +31,19 @@ def test_whatsapp_format_jid_omits_an_empty_protobuf_jid() -> None:
     assert wtb.whatsapp_format_jid(jid) == ""
 
 
+def test_whatsapp_parse_jid_populates_required_protobuf_fields() -> None:
+    jid = wtb.whatsapp_parse_jid("34123456789@s.whatsapp.net")
+
+    assert jid.SerializeToString()
+    assert {field.name for field, _value in jid.ListFields()} == {
+        "User",
+        "RawAgent",
+        "Device",
+        "Integrator",
+        "Server",
+    }
+
+
 def test_forwards_message_with_pushname_and_original_id(
     app_database: Any,
     registered_chat: int,
@@ -149,13 +162,13 @@ def test_unsupported_whatsapp_content_logs_populated_field_names(
 ) -> None:
     event = whatsapp_event_factory(text="")
     event.Message = WhatsAppMessage()
-    event.Message.audioMessage.mimetype = "audio/ogg"
+    event.Message.documentMessage.mimetype = "application/pdf"
 
     with caplog.at_level(logging.DEBUG, logger="wtb"):
         wtb.on_whatsapp_message(None, event)
 
     assert "without supported content" in caplog.text
-    assert "populated_fields=['audioMessage']" in caplog.text
+    assert "populated_fields=['documentMessage']" in caplog.text
 
 
 @pytest.mark.parametrize(
@@ -317,6 +330,62 @@ def test_forwards_gif_playback_video_as_telegram_animation(
     assert "<b>Sender:</b> Alice" in animation[1]
     assert "WhatsApp message ID: wa-message-1" in animation[1]
     assert animation[2:] == (video_data, "video/mp4")
+    assert message_rows(app_database)[0]["status"] == "SENT"
+
+
+def test_forwards_ptt_voice_note_as_telegram_voice(
+    app_database: Any,
+    registered_chat: int,
+    telegram_operations: list[tuple[str, Any]],
+    whatsapp_event_factory: Any,
+) -> None:
+    voice_data = b"fake-ogg-opus-data"
+    event = whatsapp_event_factory(
+        text="",
+        audio_caption="",
+        audio_mime_type="audio/ogg; codecs=opus",
+        audio_ptt=True,
+        pushname="Alice",
+    )
+    client = type("Client", (), {"download_any": lambda _self, _message: voice_data})()
+
+    wtb.on_whatsapp_message(client, event)
+
+    assert len(telegram_operations) == 1
+    method, voice = telegram_operations[0]
+    assert method == "sendVoice"
+    assert voice[0] == registered_chat
+    assert "<b>Sender:</b> Alice" in voice[1]
+    assert "WhatsApp message ID: wa-message-1" in voice[1]
+    assert voice[2:] == (voice_data, "audio/ogg; codecs=opus")
+    assert message_rows(app_database)[0]["status"] == "SENT"
+
+
+def test_forwards_non_ptt_audio_as_telegram_audio(
+    app_database: Any,
+    registered_chat: int,
+    telegram_operations: list[tuple[str, Any]],
+    whatsapp_event_factory: Any,
+) -> None:
+    audio_data = b"fake-mp3-data"
+    event = whatsapp_event_factory(
+        text="",
+        audio_caption="",
+        audio_mime_type="audio/mpeg",
+        audio_ptt=False,
+        pushname="Alice",
+    )
+    client = type("Client", (), {"download_any": lambda _self, _message: audio_data})()
+
+    wtb.on_whatsapp_message(client, event)
+
+    assert len(telegram_operations) == 1
+    method, audio = telegram_operations[0]
+    assert method == "sendAudio"
+    assert audio[0] == registered_chat
+    assert "<b>Sender:</b> Alice" in audio[1]
+    assert "WhatsApp message ID: wa-message-1" in audio[1]
+    assert audio[2:] == (audio_data, "audio/mpeg")
     assert message_rows(app_database)[0]["status"] == "SENT"
 
 

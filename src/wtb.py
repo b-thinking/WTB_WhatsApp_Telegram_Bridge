@@ -24,6 +24,7 @@ from dotenv import load_dotenv
 from neonize.client import NewClient
 from neonize.events import ConnectedEv, MessageEv, PairStatusEv
 from neonize.utils.enum import ClientName
+from neonize.utils.jid import JID
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATA_DIR = PROJECT_ROOT / "data"
@@ -37,6 +38,7 @@ TELEGRAM_TEXT_LIMIT = 4096
 TELEGRAM_CAPTION_LIMIT = 1024
 TELEGRAM_PHOTO_SIZE_LIMIT = 10_000_000
 TELEGRAM_VIDEO_SIZE_LIMIT = 50_000_000
+TELEGRAM_AUDIO_SIZE_LIMIT = 50_000_000
 WHATSAPP_GROUP_NAME_CACHE: dict[str, str | None] = {}
 WHATSAPP_GROUP_NAME_CACHE_LOCK = threading.Lock()
 
@@ -105,6 +107,8 @@ def database_initialize() -> sqlite3.Connection:
             record_id INTEGER PRIMARY KEY AUTOINCREMENT,
             wa_message_id TEXT NOT NULL,
             wa_chat_jid TEXT NOT NULL,
+            wa_sender_jid TEXT,
+            wa_sender_alt_jid TEXT,
             telegram_message_id INTEGER,
             telegram_chat_id INTEGER,
             direction TEXT NOT NULL,
@@ -121,8 +125,33 @@ def database_initialize() -> sqlite3.Connection:
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
             modified_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
+        CREATE TABLE IF NOT EXISTS telegram_replies (
+            telegram_message_id INTEGER PRIMARY KEY,
+            telegram_chat_id INTEGER NOT NULL,
+            replied_to_message_id INTEGER NOT NULL,
+            status TEXT NOT NULL,
+            created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+            modified_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+        );
         """
     )
+    # Compatibility with older database versions that did not store the WhatsApp sender JIDs.
+    message_columns = {
+        row["name"] for row in database.execute("PRAGMA table_info(messages)")
+    }
+    if "whatsapp_event" in message_columns:
+        database.execute("PRAGMA secure_delete = ON")
+        with database:
+            database.execute("UPDATE messages SET whatsapp_event = NULL")
+        database.execute("ALTER TABLE messages DROP COLUMN whatsapp_event")
+        database.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        database.execute("VACUUM")
+        LOGGER.info("Removed stored WhatsApp message events from the database")
+        message_columns.remove("whatsapp_event")
+    if "wa_sender_jid" not in message_columns:
+        database.execute("ALTER TABLE messages ADD COLUMN wa_sender_jid TEXT")
+    if "wa_sender_alt_jid" not in message_columns:
+        database.execute("ALTER TABLE messages ADD COLUMN wa_sender_alt_jid TEXT")
     with database:
         failed = database.execute(
             "UPDATE messages SET status = 'FAILED', modified_at = CURRENT_TIMESTAMP "
@@ -133,6 +162,10 @@ def database_initialize() -> sqlite3.Connection:
             "SET status = 'FAILED', modified_at = CURRENT_TIMESTAMP "
             "WHERE status = 'PROCESSING'"
         ).rowcount
+        interrupted_replies = database.execute(
+            "UPDATE telegram_replies SET status = 'FAILED', "
+            "modified_at = CURRENT_TIMESTAMP WHERE status = 'PROCESSING'"
+        ).rowcount
     if failed:
         LOGGER.error(
             "Marked %d interrupted message delivery attempt(s) as FAILED", failed
@@ -141,6 +174,11 @@ def database_initialize() -> sqlite3.Connection:
         LOGGER.error(
             "Marked %d interrupted Telegram rejection response(s) as FAILED",
             rejected_messages,
+        )
+    if interrupted_replies:
+        LOGGER.error(
+            "Marked %d interrupted Telegram reply attempt(s) as FAILED",
+            interrupted_replies,
         )
     return database
 
@@ -278,6 +316,24 @@ def telegram_send_animation(
     )
 
 
+def telegram_send_voice(
+    chat_id: int, caption: str, media_data: bytes, mime_type: str
+) -> dict[str, Any]:
+    """Upload a WhatsApp PTT voice note to Telegram as a voice message."""
+    return telegram_send_media(
+        "sendVoice", "voice", chat_id, caption, media_data, mime_type, "whatsapp-voice"
+    )
+
+
+def telegram_send_audio(
+    chat_id: int, caption: str, media_data: bytes, mime_type: str
+) -> dict[str, Any]:
+    """Upload regular WhatsApp audio to Telegram as an audio file."""
+    return telegram_send_media(
+        "sendAudio", "audio", chat_id, caption, media_data, mime_type, "whatsapp-audio"
+    )
+
+
 def telegram_get_registered_chat_id() -> int | None:
     """Return the registered Telegram chat ID, if one exists."""
     assert DATABASE is not None
@@ -308,7 +364,9 @@ def normalize_phone_number(number: str) -> str:
     return "".join(character for character in number if character.isdigit())
 
 
-def telegram_process_update(update: dict[str, Any]) -> None:
+def telegram_process_update(
+    update: dict[str, Any], client: NewClient | None = None
+) -> None:
     """Process Telegram registration and messages from the registered chat."""
     message = update.get("message")
     if not message:
@@ -324,7 +382,7 @@ def telegram_process_update(update: dict[str, Any]) -> None:
         if chat_id != registered_chat_id:
             LOGGER.warning("Ignoring Telegram message from an unregistered chat")
             return
-        telegram_process_registered_message(message, registered_chat_id)
+        telegram_process_registered_message(message, registered_chat_id, client)
         return
 
     contact = message.get("contact")
@@ -392,7 +450,146 @@ def telegram_message_was_forwarded(chat_id: int, message_id: int) -> bool:
     return row is not None
 
 
-def telegram_process_registered_message(message: dict[str, Any], chat_id: int) -> None:
+def telegram_download_file(file_id: str) -> bytes:
+    """Download a file sent to the bot from Telegram."""
+    result = telegram_request("getFile", {"file_id": file_id})["result"]
+    file_path = result.get("file_path")
+    if not file_path:
+        raise RuntimeError("Telegram getFile response did not include a file path")
+    url = (
+        f"https://api.telegram.org/file/bot{CONFIG['TELEGRAM_BOT_TOKEN']}/"
+        f"{file_path}"
+    )
+    try:
+        with urlopen(Request(url, method="GET"), timeout=40) as response:
+            return response.read()
+    except (HTTPError, URLError, TimeoutError, OSError) as error:
+        raise RuntimeError(
+            f"Telegram file download failed ({type(error).__name__})"
+        ) from None
+
+
+def telegram_forward_reply(
+    message: dict[str, Any], chat_id: int, client: NewClient | None
+) -> None:
+    """Forward an accepted Telegram reply to its original WhatsApp chat."""
+    message_id = message.get("message_id")
+    reply = message["reply_to_message"]
+    replied_to_id = reply.get("message_id")
+    assert DATABASE is not None
+    with DATABASE_LOCK, DATABASE:
+        mapping = DATABASE.execute(
+            "SELECT wa_message_id, wa_chat_jid, wa_sender_jid, wa_sender_alt_jid "
+            "FROM messages "
+            "WHERE telegram_chat_id = ? AND telegram_message_id = ? "
+            "AND status = 'SENT'",
+            (chat_id, replied_to_id),
+        ).fetchone()
+        if mapping is None:
+            LOGGER.warning(
+                "Ignoring Telegram reply %s because message %s was not forwarded from WhatsApp",
+                message_id,
+                replied_to_id,
+            )
+            return
+        cursor = DATABASE.execute(
+            "INSERT OR IGNORE INTO telegram_replies "
+            "(telegram_message_id, telegram_chat_id, replied_to_message_id, status) "
+            "VALUES (?, ?, ?, 'PROCESSING')",
+            (message_id, chat_id, replied_to_id),
+        )
+        if cursor.rowcount == 0:
+            LOGGER.debug("Ignoring replayed Telegram reply %s", message_id)
+            return
+
+    try:
+        quoted = whatsapp_build_quote_event(
+            mapping["wa_message_id"],
+            mapping["wa_chat_jid"],
+            mapping["wa_sender_jid"],
+            mapping["wa_sender_alt_jid"],
+        )
+        LOGGER.debug(
+            "Prepared content-free WhatsApp quote for Telegram reply %s: "
+            "original_message_id=%s message_fields=%s recipient_jid_fields=%s "
+            "sender_alt_available=%s",
+            message_id,
+            mapping["wa_message_id"],
+            whatsapp_present_message_fields(quoted.Message),
+            whatsapp_present_message_fields(quoted.Info.MessageSource.Chat),
+            bool(mapping["wa_sender_alt_jid"]),
+        )
+        if client is None:
+            raise RuntimeError("WhatsApp client is not available")
+        recipient = quoted.Info.MessageSource.Chat
+        caption = message.get("caption", "")
+        if "photo" in message:
+            photos = message["photo"]
+            if not photos:
+                raise ValueError("Telegram photo reply has no photo sizes")
+            largest_photo = max(
+                photos,
+                key=lambda photo: (
+                    photo.get("width", 0) * photo.get("height", 0),
+                    photo.get("file_size", 0),
+                ),
+            )
+            media = telegram_download_file(largest_photo["file_id"])
+            client.send_image(recipient, media, caption=caption or None, quoted=quoted)
+            content_type = "photo"
+        elif "video" in message:
+            media = telegram_download_file(message["video"]["file_id"])
+            client.send_video(recipient, media, caption=caption or None, quoted=quoted)
+            content_type = "video"
+        elif "animation" in message:
+            media = telegram_download_file(message["animation"]["file_id"])
+            client.send_video(
+                recipient,
+                media,
+                caption=caption or None,
+                quoted=quoted,
+                gifplayback=True,
+                is_gif=True,
+            )
+            content_type = "animation"
+        elif message.get("text"):
+            client.reply_message(message["text"], quoted=quoted, to=recipient)
+            content_type = "text"
+        else:
+            LOGGER.warning("Ignoring unsupported Telegram reply %s", message_id)
+            with DATABASE_LOCK, DATABASE:
+                DATABASE.execute(
+                    "UPDATE telegram_replies SET status = 'FAILED', "
+                    "modified_at = CURRENT_TIMESTAMP WHERE telegram_message_id = ?",
+                    (message_id,),
+                )
+            return
+    except Exception:
+        with DATABASE_LOCK, DATABASE:
+            DATABASE.execute(
+                "UPDATE telegram_replies SET status = 'FAILED', "
+                "modified_at = CURRENT_TIMESTAMP WHERE telegram_message_id = ?",
+                (message_id,),
+            )
+        raise
+    with DATABASE_LOCK, DATABASE:
+        DATABASE.execute(
+            "UPDATE telegram_replies SET status = 'SENT', "
+            "modified_at = CURRENT_TIMESTAMP WHERE telegram_message_id = ?",
+            (message_id,),
+        )
+    LOGGER.info(
+        "Forwarded Telegram %s reply %s to WhatsApp chat %s quoting message %s",
+        content_type,
+        message_id,
+        mapping["wa_chat_jid"],
+        replied_to_id,
+    )
+
+
+def telegram_process_registered_message(
+    message: dict[str, Any], chat_id: int, client: NewClient | None = None
+) -> None:
     """Reject standalone messages and recognize replies to prior bridge messages."""
     message_id = message.get("message_id")
     reply = message.get("reply_to_message")
@@ -410,11 +607,7 @@ def telegram_process_registered_message(message: dict[str, Any], chat_id: int) -
                 replied_to_id,
             )
         elif telegram_message_was_forwarded(chat_id, replied_to_id):
-            LOGGER.info(
-                "Received Telegram reply %s to a forwarded WhatsApp message; "
-                "reply forwarding is not implemented yet",
-                message_id,
-            )
+            telegram_forward_reply(message, chat_id, client)
         else:
             LOGGER.warning(
                 "Ignoring Telegram reply %s because message %s was not forwarded "
@@ -476,7 +669,7 @@ def telegram_process_registered_message(message: dict[str, Any], chat_id: int) -
         )
 
 
-def telegram_polling_loop() -> None:
+def telegram_polling_loop(client: NewClient | None = None) -> None:
     """Poll Telegram updates and persist the confirmed update offset."""
     assert DATABASE is not None
     row = DATABASE.execute(
@@ -490,7 +683,7 @@ def telegram_polling_loop() -> None:
             payload["offset"] = offset
         updates = telegram_request("getUpdates", payload, timeout=40)["result"]
         for update in updates:
-            telegram_process_update(update)
+            telegram_process_update(update, client)
             offset = update["update_id"] + 1
             with DATABASE_LOCK, DATABASE:
                 DATABASE.execute(
@@ -546,6 +739,8 @@ def split_html_text(text: str, max_length: int) -> list[str]:
 
 def whatsapp_format_jid(jid: Any) -> str:
     """Format a Neonize JID as a stable string."""
+    if jid is None:
+        return ""
     if getattr(jid, "IsEmpty", False):
         return ""
     user = getattr(jid, "User", "")
@@ -553,6 +748,40 @@ def whatsapp_format_jid(jid: Any) -> str:
     if user and server:
         return f"{user}@{server}"
     return str(jid)
+
+
+def whatsapp_parse_jid(jid_string: str) -> JID:
+    """Build a Neonize JID from the stored user@server identifier."""
+    user, separator, server = jid_string.partition("@")
+    if not separator or not user or not server:
+        raise ValueError(f"Invalid WhatsApp JID: {jid_string!r}")
+    return JID(
+        User=user,
+        RawAgent=0,
+        Device=0,
+        Integrator=0,
+        Server=server,
+    )
+
+
+def whatsapp_build_quote_event(
+    message_id: str,
+    chat_jid: str,
+    sender_jid: str | None,
+    sender_alt_jid: str | None,
+) -> MessageEv:
+    """Build quote metadata using identifiers only, without original content."""
+    event = MessageEv()
+    event.Info.ID = message_id
+    # Neonize raises IndexError when get_message_type() sees no populated field.
+    # Mark this as empty text so the quote remains content-free but has a type.
+    event.Message.conversation = ""
+    source = event.Info.MessageSource
+    source.Chat.CopyFrom(whatsapp_parse_jid(chat_jid))
+    source.Sender.CopyFrom(whatsapp_parse_jid(sender_jid or chat_jid))
+    if sender_alt_jid:
+        source.SenderAlt.CopyFrom(whatsapp_parse_jid(sender_alt_jid))
+    return event
 
 
 def whatsapp_get_group_name(client: NewClient, group_jid: Any) -> str | None:
@@ -605,7 +834,8 @@ def on_whatsapp_message(client: NewClient, event: MessageEv) -> None:
                 "Ignoring WhatsApp %s message: message_id=%r chat_jid=%s "
                 "group_name=%r chat_server=%r source_is_group=%s "
                 "sender_jid=%s sender_alt_jid=%s pushname=%r "
-                "broadcast_list_owner=%s",
+                "broadcast_list_owner=%s whatsapp_type=%r media_type=%r "
+                "populated_fields=%s",
                 conversation_type,
                 getattr(event.Info, "ID", ""),
                 whatsapp_format_jid(chat_jid),
@@ -616,11 +846,15 @@ def on_whatsapp_message(client: NewClient, event: MessageEv) -> None:
                 whatsapp_format_jid(sender_alt_jid) if sender_alt_jid else "",
                 getattr(event.Info, "Pushname", ""),
                 whatsapp_format_jid(broadcast_owner) if broadcast_owner else "",
+                getattr(event.Info, "Type", ""),
+                getattr(event.Info, "MediaType", ""),
+                whatsapp_present_message_fields(event.Message),
             )
             return
         image_message = whatsapp_get_message_field(event.Message, "imageMessage")
         video_message = whatsapp_get_message_field(event.Message, "videoMessage")
-        media_message = image_message or video_message
+        audio_message = whatsapp_get_message_field(event.Message, "audioMessage")
+        media_message = image_message or video_message or audio_message
         if image_message is not None:
             media_kind = "image"
             telegram_media_sender = telegram_send_photo
@@ -634,6 +868,14 @@ def on_whatsapp_message(client: NewClient, event: MessageEv) -> None:
             )
             media_size_limit = TELEGRAM_VIDEO_SIZE_LIMIT
             default_mime_type = "video/mp4"
+        elif audio_message is not None:
+            is_voice_note = bool(getattr(audio_message, "ptt", False))
+            media_kind = "voice note" if is_voice_note else "audio"
+            telegram_media_sender = (
+                telegram_send_voice if is_voice_note else telegram_send_audio
+            )
+            media_size_limit = TELEGRAM_AUDIO_SIZE_LIMIT
+            default_mime_type = "audio/ogg" if is_voice_note else "audio/mpeg"
         else:
             media_kind = ""
             telegram_media_sender = None
@@ -659,13 +901,22 @@ def on_whatsapp_message(client: NewClient, event: MessageEv) -> None:
             return
         wa_message_id = str(event.Info.ID)
         wa_chat_jid = whatsapp_format_jid(chat_jid)
+        wa_sender_jid = whatsapp_format_jid(getattr(source, "Sender", None))
+        wa_sender_alt_jid = whatsapp_format_jid(getattr(source, "SenderAlt", None))
         assert DATABASE is not None
         with DATABASE_LOCK, DATABASE:
             cursor = DATABASE.execute(
                 "INSERT OR IGNORE INTO messages "
-                "(wa_message_id, wa_chat_jid, telegram_chat_id, direction, status) "
-                "VALUES (?, ?, ?, 'WHATSAPP_TO_TELEGRAM', 'PROCESSING')",
-                (wa_message_id, wa_chat_jid, telegram_chat_id),
+                "(wa_message_id, wa_chat_jid, wa_sender_jid, wa_sender_alt_jid, "
+                "telegram_chat_id, direction, status) "
+                "VALUES (?, ?, ?, ?, ?, 'WHATSAPP_TO_TELEGRAM', 'PROCESSING')",
+                (
+                    wa_message_id,
+                    wa_chat_jid,
+                    wa_sender_jid,
+                    wa_sender_alt_jid,
+                    telegram_chat_id,
+                ),
             )
         if cursor.rowcount == 0:
             LOGGER.debug("Ignoring duplicate WhatsApp message %s", wa_message_id)
@@ -907,7 +1158,7 @@ def main() -> int:
                 return 4
 
         LOGGER.info("Starting Telegram polling...")
-        telegram_polling_loop()
+        telegram_polling_loop(client)
     except KeyboardInterrupt:
         LOGGER.info("Shutdown requested")
         return 0
