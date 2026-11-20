@@ -953,6 +953,9 @@ def on_whatsapp_message(client: NewClient, event: MessageEv) -> None:
         )
         media_message = image_message or video_message or audio_message or document_message
         document_filename = ""
+        telegram_media_sender: Callable[
+            [int, str, bytes, str], dict[str, Any]
+        ] | None
         if image_message is not None:
             media_kind = "image"
             telegram_media_sender = telegram_send_photo
@@ -976,7 +979,7 @@ def on_whatsapp_message(client: NewClient, event: MessageEv) -> None:
             default_mime_type = "audio/ogg" if is_voice_note else "audio/mpeg"
         elif document_message is not None:
             media_kind = "document"
-            telegram_media_sender = telegram_send_document
+            telegram_media_sender = None
             media_size_limit = TELEGRAM_DOCUMENT_SIZE_LIMIT
             default_mime_type = "application/octet-stream"
             document_filename = getattr(document_message, "fileName", "").strip()
@@ -1117,9 +1120,8 @@ def on_whatsapp_message(client: NewClient, event: MessageEv) -> None:
                     overflow_chunks = split_html_text(text, max_body_length)
                     media_caption = header.rstrip()
 
-                assert telegram_media_sender is not None
                 if document_message is not None:
-                    result = telegram_media_sender(
+                    result = telegram_send_document(
                         telegram_chat_id,
                         media_caption,
                         media_data,
@@ -1127,6 +1129,7 @@ def on_whatsapp_message(client: NewClient, event: MessageEv) -> None:
                         document_filename or "whatsapp-document",
                     )["result"]
                 else:
+                    assert telegram_media_sender is not None
                     result = telegram_media_sender(
                         telegram_chat_id, media_caption, media_data, mime_type
                     )["result"]
