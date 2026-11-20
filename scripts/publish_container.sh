@@ -95,6 +95,7 @@ podman run --rm --name "${GHCR_TAG}" \
     -e LOG_LEVEL="DEBUG" \
     -e TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN}" \
     -e PHONE_NUMBER=${PHONE_NUMBER} \
+    -v ${WORKSPACE_DIR}/data:/app/data \
     ${GHCR_REGISTRY}/${GHCR_TAG}:${GHCR_VERSION} 
 
 cd "$current_dir"
